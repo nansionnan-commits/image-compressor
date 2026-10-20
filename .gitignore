@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 压缩输出（本工具的产物）
+compressed/
+输出/
+
+# 测试残留
+_t_*
+*.opt
+*.tmp
+_err.log
+page.txt
+temp_top.txt
+scan_*
+matrix-media-*
+lark_qr.png
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 系统
+Thumbs.db
+desktop.ini
