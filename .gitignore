@@ -19,6 +19,24 @@ temp_top.txt
 scan_*
 matrix-media-*
 lark_qr.png
+_test_min.py
+
+# PyInstaller 临时产物
+build_tmp/
+build/
+*.spec
+
+# 调试日志 (Flet 启动报错、stdout 抓取)
+flet*.txt
+flet*.log
+flet_screen.png
+min_*.txt
+min_*.log
+python_*.txt
+python_*.log
+dist_*.log
+_t_FLET_*.txt
+_t_WEB_*.txt
 
 # 编辑器
 .vscode/

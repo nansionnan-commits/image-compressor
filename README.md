@@ -8,23 +8,27 @@
 
 ## 快速开始
 
-### 图形界面版（推荐）
+### 方式一：双击桌面快捷方式（推荐，v5 新增）
 
-双击 **`图片一键压缩.bat`**
+桌面上会有一个 **「图片一键压缩」** 图标（首次启动点 AppBar 右上角的「🔗」图标即可创建），双击就开。
 
-1. 把图片拖进去，或者点「选文件 / 选文件夹」
-2. 点一个预设（默认就是 ⚡ 推荐压缩）
-3. 点「▶ 开始压缩」
+### 方式二：双击 `.exe`（v5 新增）
 
-### 命令行版
+`dist/ImageCompressor.exe`，21.7 MB，单文件，不需要装 Python 也能跑（首次会下载 Flet 客户端到 `%USERPROFILE%\.flet\client\`，约 40 MB，之后就缓存）。
 
-把图片**直接拖到** `拖我压缩.bat` 图标上，松手就压。
+### 方式三：从源码启动
 
-或者手动：
-
-```bash
-python compress_images.py 输入目录
+```powershell
+C:\Python311\pythonw.exe compress_images_flet.py
 ```
+
+### Tkinter 旧版（v4 兼容入口，保留作为后备）
+
+```powershell
+C:\Python311\python.exe compress_images_gui.py
+```
+
+或双击 `图片一键压缩.bat`。
 
 ---
 
@@ -80,10 +84,9 @@ python compress_images.py 输入目录
 
 ## 环境要求
 
-- Python 3.8+
-- Pillow：`pip install pillow`
-
-Tkinter 是 Python 自带的，不用装。
+- 从源码运行：Python 3.11（v5 锁版本，Flet 1.0.4 桌面客户端在该版本最稳）+ Pillow
+- 用 `.exe`：什么都不用装，Win10/11 64 位即可
+- Tkinter 是 Python 自带的，不用装
 
 ---
 
@@ -91,11 +94,14 @@ Tkinter 是 Python 自带的，不用装。
 
 | 文件 | 作用 |
 |---|---|
-| `compress_images_gui.py` | 图形界面主程序 |
+| `compress_images_flet.py` | **v5 入口**，Flet Material 3 桌面 GUI（推荐） |
+| `compress_images_gui.py` | v4 Tkinter 旧版（保留作为后备） |
+| `_core.py` | 压缩引擎（GUI / CLI 共用） |
 | `_jpeg_strip.py` | JPEG 无损优化器（纯 Python，替代 jpegoptim） |
-| `图片一键压缩.bat` | 双击启动 GUI |
-| `compress_images.py` | 命令行版 |
-| `拖我压缩.bat` | 双击 = 拖图到它上面压 |
+| `compress_images.py` | 命令行版（拖图到 `拖我压缩.bat` 上） |
+| `dist/ImageCompressor.exe` | v5 打包好的单文件可执行（21.7 MB） |
+| `图片一键压缩.bat` | 启动 Tkinter 旧版 |
+| `拖我压缩.bat` | 拖图 = 压 |
 
 ---
 
@@ -109,7 +115,45 @@ Tkinter 是 Python 自带的，不用装。
 
 ## 隐私
 
-所有图片处理都在本机完成，不上传任何服务器，不联网。
+所有图片处理都在本机完成，不上传任何服务器，不联网。v5 唯一一次网络请求是首次启动下载 Flet 桌面客户端（缓存到本地，之后不再访问）。
+
+---
+
+## 更新日志（CHANGELOG）
+
+### v5 — Flet Material 3 桌面 GUI（2026-10-20）
+
+**界面重做**
+
+- 从 Tkinter 迁移到 Flet 1.0.4 Material 3 桌面客户端
+- 5 段预设选择器、GridView 缩略图、实时预览、设置面板（默认输出目录 / 默认预设 / 窗口尺寸 持久化到 `config.json`）
+- AppBar 右上角「🔗」一键创建桌面快捷方式，参数全部正确（指向 Python 3.11，不踩裸 `python` 调到 3.14 的坑）
+
+**打包**
+
+- PyInstaller 6.22.3 单文件 `.exe`（21.7 MB，路径 `dist/ImageCompressor.exe`）
+- 首次启动会下载 Flet 桌面客户端到 `%USERPROFILE%\.flet\client\flet-desktop-full-1.0.4\`（约 40 MB），之后本地缓存
+
+**压缩引擎保持兼容**
+
+- 抽出 `_core.py` 共用压缩逻辑，GUI / CLI 同一份代码
+- `🎯 无损压缩` / `💎 极致保真` 仍走 `_jpeg_strip.py`，数学零损失
+- 智能回退（压完 ≥ 95% 直接保留原图）和 50KB 以下跳过两条保命设计保留
+
+**兼容入口**
+
+- Tkinter 旧版（v4）未删除，仍可双击 `图片一键压缩.bat` 启动，作为退路
+
+### v4 — Tkinter 旧版基线
+
+- Tkinter GUI，5 预设，无 EXIF 无损保留
+- `compress_images_gui.py` + `图片一键压缩.bat`
+- 这条 commit 是 v5 重写前的稳定基线
+
+### v3 及更早
+
+- 命令行版 `compress_images.py`、拖图到 `拖我压缩.bat` 上即可
+- 最初版的 JPEG 无损剥 EXIF 实现
 
 ---
 
