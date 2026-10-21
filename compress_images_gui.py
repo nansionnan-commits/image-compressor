@@ -2,7 +2,7 @@
 图瘦身 (PicShrink) — 单文件 GUI 入口 (压缩引擎 + Tkinter + tkinterdnd2 OS 拖拽).
 
 品牌: 中文名「图瘦身」/ 英文名 PicShrink / exe 名「图瘦身.exe」.
-版本: v8 (按品牌 + 图标重做; 压缩引擎与 v7 同源, 7 预设 / 目标体积 / 像素零差异保护不变).
+版本: v9 (加资源管理器右键 / 发送到 快捷入口, 压缩引擎与 v8 完全同一套).
 
 核心能力 (相对早期 v3/v4):
   - 7 个预设 (按"画质损失程度"分层):
@@ -14,13 +14,16 @@
   - 单文件 PyInstaller 打包, 内置 Python + Pillow + tkdnd 资源.
 """
 
+import ctypes
 import io
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -398,7 +401,7 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("图瘦身 v8 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
+        root.title("图瘦身 v9 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
         root.geometry("1000x880")
         # 窗口图标 (含任务栏图标). 兼容 PyInstaller 单文件 (sys._MEIPASS).
         try:
@@ -629,6 +632,8 @@ class App:
         self.target_var.set(str(p.get("target_kb", 0)))
         self.preset_hint.config(text=f"已选: {name}  ({p['desc']})")
         if not silent:
+            # v9: 手动换预设时记一笔, 右键快捷入口下次就直接用这个
+            _v9_save_preset(name)
             self._log(f">>> 预设: {name}  ({p['desc']})\n")
         self._refresh_preview()
 
@@ -980,7 +985,917 @@ class App:
         self.log.see("end")
 
 
-def main():
+# ============================================================
+#  V9 快捷入口 (资源管理器右键 / 发送到 / 拖到 exe 图标)
+# ============================================================
+#  行为约定:
+#    不带参数            → 打开完整 GUI
+#    带图片/文件夹路径    → 直接压缩 (走上面同一套 7 预设引擎), 弹结果窗
+#    --gui               → 打开 GUI 并把文件预载进待压缩列表 (不直接压)
+#    --preset N|全名     → 指定预设 (1-7 或全名), 默认沿用 GUI 里手动选过的那个
+#    --out DIR           → 输出根目录, 默认 %USERPROFILE%\picshrink_out
+#    --format keep|jpg|png|webp → 覆盖预设里的输出格式
+#    --no-notify         → 不弹任何窗 (给脚本 / 自动化测试用)
+#    --list-presets      → 列出全部预设后退出
+#
+#  两个必须记住的前提:
+#    1) exe 是 console=False 打包的, 没有控制台 -> 进度/结果/错误全靠自绘窗口,
+#       另外落一份日志到 %TEMP%\picshrink_v9.log 方便事后查。
+#    2) 输出目录 = out_root/<源文件夹名>/, 跟 GUI 里 compress_one 的策略一致,
+#       不同源文件夹的同名图不会互相覆盖; 原图永远不动。
+V9_DEFAULT_OUT = "picshrink_out"
+V9_LOG_NAME = "picshrink_v9.log"
+V9_FALLBACK_PRESET = "⚡ 推荐压缩"
+
+
+def _v9_log(msg: str = "") -> None:
+    """快捷入口排错日志. windowed 打包下没有 stderr, 只能落盘."""
+    try:
+        p = Path(os.environ.get("TEMP", ".")) / V9_LOG_NAME
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(msg.rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def _v9_print(msg: str = "") -> None:
+    """windowed 打包下 sys.stdout 可能是 None, 打印一律包起来."""
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
+def _v9_config_path() -> Path:
+    r"""快捷入口的偏好文件: %LOCALAPPDATA%\图瘦身\quick.json"""
+    base = os.environ.get("LOCALAPPDATA") or ""
+    root = Path(base) if base else Path.home()
+    return root / "图瘦身" / "quick.json"
+
+
+def _v9_load_preset() -> str:
+    """快捷入口默认预设 = GUI 里你手动点过的那个; 没点过就用 ⚡ 推荐压缩."""
+    try:
+        p = _v9_config_path()
+        if p.is_file():
+            import json
+            name = json.loads(p.read_text(encoding="utf-8")).get("preset")
+            if name in PRESETS:
+                return name
+    except Exception:
+        pass
+    return V9_FALLBACK_PRESET
+
+
+def _v9_save_preset(name: str) -> None:
+    """GUI 里手动换预设时记一笔, 右键快捷入口下次就用它."""
+    if name not in PRESETS:
+        return
+    try:
+        import json
+        p = _v9_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"preset": name}, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_V9_VALUE_OPTS = {"--preset": "preset", "--out": "out", "--format": "format"}
+
+V9_USAGE = f"""图瘦身 (PicShrink) v9 — 快捷压缩入口
+
+  图瘦身.exe                            打开图形界面
+  图瘦身.exe "D:\\图\\a.jpg"             直接压缩这一张
+  图瘦身.exe "D:\\图\\*.jpg"             按通配符批量压
+  图瘦身.exe "D:\\图"                    整个文件夹 (自动递归)
+  图瘦身.exe --gui "D:\\图"              打开界面并预载这些图
+  图瘦身.exe --preset 6 "D:\\图"         用第 6 个预设压
+  图瘦身.exe --preset "🛒 亚马逊主图" "D:\\图"
+  图瘦身.exe --out "D:\\出图" "D:\\图"   指定输出根目录
+
+选项
+  --preset N|全名        1-{len(PRESETS)} 或预设全名
+  --out DIR              输出根目录 (默认 %USERPROFILE%\\{V9_DEFAULT_OUT})
+  --format keep|jpg|png|webp
+                         覆盖预设的输出格式 (默认保持原格式)
+  --gui                  打开 GUI 并预载文件, 不直接压
+  --install              装上右键菜单 / 发送到 / 桌面快捷方式
+  --uninstall            卸掉上面这些 (压缩结果不删)
+  --no-notify            不弹窗 (脚本 / 批处理用)
+  --quiet                静默模式: 不弹窗, 只写日志
+  --list-presets         列出全部预设
+  -h, --help             显示本说明
+
+原图永不覆盖: 输出统一写到 <输出根目录>\\<源文件夹名>\\ 下。
+"""
+
+
+def _v9_parse(argv: list[str]):
+    """手写参数解析: 右键只传路径, 这里再兼容几个开关.
+
+    返回 (opts, paths)。未知开关一律忽略, 免得 Explorer 传个怪东西就崩。
+    """
+    opts = {"preset": None, "out": None, "format": None,
+            "gui": False, "notify": True, "help": False, "list_presets": False,
+            "install": False, "uninstall": False, "quiet": False}
+    paths: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        low = a.lower()
+        if low in ("-h", "--help", "/?"):
+            opts["help"] = True
+        elif low == "--list-presets":
+            opts["list_presets"] = True
+        elif low == "--gui":
+            opts["gui"] = True
+        elif low == "--no-notify":
+            opts["notify"] = False
+        elif low == "--install":
+            opts["install"] = True
+        elif low == "--uninstall":
+            opts["uninstall"] = True
+        elif low == "--quiet":
+            opts["quiet"] = True
+            opts["notify"] = False
+        elif "=" in a and a.split("=", 1)[0].lower() in _V9_VALUE_OPTS:
+            opts[_V9_VALUE_OPTS[a.split("=", 1)[0].lower()]] = a.split("=", 1)[1]
+        elif low in _V9_VALUE_OPTS:
+            if i + 1 < len(argv):
+                opts[_V9_VALUE_OPTS[low]] = argv[i + 1]
+                i += 1
+            else:
+                opts["help"] = True
+        elif not a.startswith("-"):
+            paths.append(a)
+        i += 1
+    return opts, paths
+
+
+def _v9_expand(paths: list[str]) -> list[Path]:
+    """把命令行里的路径展开成一张去重后的图片清单.
+
+    支持: 单个文件 / 文件夹(递归) / 通配符. 非图片一律忽略。
+    """
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in paths:
+        s = raw.strip().strip('"')
+        if not s:
+            continue
+        p = Path(s)
+        cands: list[Path] = []
+        if p.is_dir():
+            try:
+                cands = [q for q in sorted(p.rglob("*"))
+                         if q.is_file() and q.suffix.lower() in SUPPORTED]
+            except OSError:
+                cands = []
+        elif p.is_file():
+            if p.suffix.lower() in SUPPORTED:
+                cands = [p]
+        elif any(ch in s for ch in "*?"):
+            base = p.parent if str(p.parent) not in ("", ".") else Path(".")
+            try:
+                cands = [q for q in sorted(base.glob(p.name))
+                         if q.is_file() and q.suffix.lower() in SUPPORTED]
+            except (OSError, ValueError):
+                cands = []
+        for q in cands:
+            try:
+                key = str(q.resolve()).lower()
+            except OSError:
+                key = str(q).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(q)
+    return out
+
+
+def _v9_resolve_preset(spec: str | None) -> str:
+    """预设可以是全名 / 1-7 序号 / mode 名 (balanced 之类)."""
+    if not spec:
+        return _v9_load_preset()
+    s = spec.strip()
+    if s in PRESETS:
+        return s
+    if s.isdigit():
+        idx = int(s)
+        keys = list(PRESETS.keys())
+        if 1 <= idx <= len(keys):
+            return keys[idx - 1]
+    for k, v in PRESETS.items():
+        if v.get("mode") == s:
+            return k
+    raise ValueError(f"未知预设: {spec} (可用 1-{len(PRESETS)} 或预设全名)")
+
+
+def _v9_icon(root) -> None:
+    """窗口图标. 兼容 PyInstaller 单文件 (资源在 sys._MEIPASS 里)."""
+    try:
+        base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent))
+        ico = Path(base) / "app.ico"
+        if ico.is_file():
+            root.iconbitmap(default=str(ico))
+    except Exception:
+        pass
+
+
+def _v9_style(root) -> None:
+    try:
+        style = ttk.Style(root)
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        elif "clam" in style.theme_names():
+            style.theme_use("clam")
+    except Exception:
+        pass
+
+
+def _v9_geometry(root, w: int, h: int) -> str:
+    """尽量把窗口摆到屏幕中间偏上, 抢眼但不离谱."""
+    try:
+        x = max(0, (root.winfo_screenwidth() - w) // 2)
+        y = max(0, (root.winfo_screenheight() - h) // 3)
+        return f"{w}x{h}+{x}+{y}"
+    except Exception:
+        return f"{w}x{h}"
+
+
+def _v9_compress_all(files: list[Path], out_root: Path, mode: str, quality: int,
+                     fmt_arg: str, max_side: int, keep_exif: bool, target_kb: int,
+                     on_done=None) -> list[dict]:
+    """逐张压, 返回结果字典列表. 完全复用 GUI 的 compress_one."""
+    results: list[dict] = []
+    for i, src in enumerate(files):
+        try:
+            save_fmt, ext = pick_output_format(src, fmt_arg)
+        except Exception:
+            save_fmt, ext = "JPEG", "jpg"
+        rec = {"src": src, "out": None, "src_bytes": 0, "out_bytes": 0,
+               "msg": "", "ok": False}
+        try:
+            rec["src_bytes"] = src.stat().st_size
+        except OSError:
+            pass
+        try:
+            out_path, sb, ob, msg = compress_one(
+                src, out_root, mode, quality, save_fmt, ext,
+                max_side, keep_exif, True, target_kb)
+            rec.update(out=out_path, src_bytes=sb, out_bytes=ob, msg=msg)
+        except Exception as e:
+            rec["msg"] = f"失败: {e}"
+        rec["ok"] = str(rec["msg"]).startswith("ok")
+        results.append(rec)
+        _v9_log(f"  {src.name} -> {rec['msg']}")
+        if on_done:
+            try:
+                on_done(i + 1)
+            except Exception:
+                pass
+    return results
+
+
+def _v9_rc(results: list[dict]) -> int:
+    """0 = 全好 / 有跳过; 1 = 有失败; 2 = 压根没东西可压."""
+    if not results:
+        return 2
+    fail = sum(1 for r in results if not r["ok"] and "跳过" not in r["msg"])
+    return 1 if fail else 0
+
+
+def _v9_report_text(results: list[dict], out_root: Path, preset_name: str) -> str:
+    ok = sum(1 for r in results if r["ok"])
+    skip = sum(1 for r in results if not r["ok"] and "跳过" in r["msg"])
+    fail = len(results) - ok - skip
+    saved = sum(r["src_bytes"] - r["out_bytes"]
+                for r in results if r["ok"] and r["out_bytes"] > 0)
+    lines = [
+        "图瘦身 v9 — 完成",
+        f"预设: {preset_name}",
+        f"成功 {ok} · 跳过 {skip} · 失败 {fail}",
+        f"省下: {human_size(max(0, saved))}" if saved > 0 else "没省下体积",
+        f"输出: {out_root}",
+        "",
+    ]
+    for r in results:
+        lines.append(f"{r['src'].name}: {r['msg']}")
+    return "\n".join(lines)
+
+
+def _v9_fatal(msg: str, notify: bool = True) -> None:
+    """无法继续时的提示. notify=False (脚本模式) 只落日志."""
+    _v9_log("[FATAL] " + msg)
+    _v9_print(msg)
+    if not notify:
+        return
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        _v9_icon(root)
+        messagebox.showerror("图瘦身 v9", msg, parent=root)
+        root.destroy()
+    except Exception:
+        pass
+
+
+def _v9_result_ui(root, results: list[dict], out_root: Path,
+                  preset_name: str, auto_close_ms: int = 8000) -> None:
+    """结果窗: 三个数 + 明细列表 + 打开输出目录, 8 秒后自动关."""
+    ok = sum(1 for r in results if r["ok"])
+    skip = sum(1 for r in results if not r["ok"] and "跳过" in r["msg"])
+    fail = len(results) - ok - skip
+    saved = sum(r["src_bytes"] - r["out_bytes"]
+                for r in results if r["ok"] and r["out_bytes"] > 0)
+
+    for w in root.winfo_children():
+        w.destroy()
+    root.title("图瘦身 v9 — 完成")
+    root.geometry(_v9_geometry(root, 620, 460))
+    root.minsize(620, 460)
+
+    head = ttk.Frame(root, padding=(16, 14, 16, 6))
+    head.pack(fill="x")
+    if fail:
+        title_text, color = f"完成, 但有 {fail} 张失败", "#c0392b"
+    elif skip:
+        title_text, color = "搞定 (有图压不动, 已保留原样)", "#b7791f"
+    else:
+        title_text, color = "全部搞定!", "#1e8449"
+    ttk.Label(head, text=title_text, font=("Microsoft YaHei UI", 13, "bold"),
+              foreground=color).pack(anchor="w")
+    ttk.Label(head, text=f"预设: {preset_name}",
+              font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+    detail = f"成功 {ok}   跳过 {skip}   失败 {fail}"
+    if saved > 0:
+        detail += f"   ·   共省下 {human_size(saved)}"
+    ttk.Label(head, text=detail, font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(4, 0))
+
+    body = ttk.Frame(root, padding=(12, 0, 12, 0))
+    body.pack(fill="both", expand=True)
+    txt = tk.Text(body, font=("Consolas", 9), wrap="word", height=12, relief="solid", bd=1)
+    sb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+    txt.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    txt.pack(side="left", fill="both", expand=True)
+    for r in results:
+        if r["ok"]:
+            line = f"✅ {r['src'].name}  {human_size(r['src_bytes'])} → {human_size(r['out_bytes'])}"
+        elif "跳过" in r["msg"]:
+            line = f"⏭️  {r['src'].name}  {r['msg']}"
+        else:
+            line = f"❌ {r['src'].name}  {r['msg']}"
+        txt.insert("end", line + "\n")
+    txt.configure(state="disabled")
+
+    foot = ttk.Frame(root, padding=(12, 8, 12, 12))
+    foot.pack(fill="x")
+    ttk.Label(foot, text=f"输出目录: {out_root}",
+              font=("Microsoft YaHei UI", 8), foreground="#666").pack(anchor="w")
+
+    btns = ttk.Frame(foot)
+    btns.pack(fill="x", pady=(6, 0))
+
+    def open_out():
+        try:
+            os.startfile(str(out_root))
+        except Exception:
+            pass
+
+    ttk.Button(btns, text="📂 打开输出目录", command=open_out).pack(side="left")
+    ttk.Button(btns, text="全部重压一遍", command=root.destroy).pack(side="left", padx=8)
+    ttk.Button(btns, text="完成", command=root.destroy).pack(side="right")
+
+    if auto_close_ms > 0:
+        left = {"n": auto_close_ms // 1000}
+
+        def countdown():
+            left["n"] -= 1
+            if left["n"] <= 0:
+                root.destroy()
+            else:
+                lbl.config(text=f"{left['n']} 秒后自动关闭")
+                root.after(1000, countdown)
+
+        lbl = ttk.Label(foot, text=f"{auto_close_ms // 1000} 秒后自动关闭",
+                        font=("Microsoft YaHei UI", 8), foreground="#999")
+        lbl.pack(side="right")
+        root.after(1000, countdown)
+
+
+def _v9_quick(paths: list[str], opts: dict) -> int:
+    """V9 快捷压缩主流程: 进度窗 → 后台压缩 → 结果窗."""
+    files = _v9_expand(paths)
+    if not files:
+        _v9_fatal(
+            "没找到可处理的图片。\n\n"
+            "可以这样用:\n"
+            "  · 选中图片右键 → 用图瘦身处理\n"
+            "  · 选中文件夹 (自动递归所有图片)\n"
+            "  · 命令行传通配符, 例如 图瘦身.exe \"D:\\图\\*.jpg\"\n\n"
+            "支持的格式: " + ", ".join(sorted(SUPPORTED)),
+            notify=opts["notify"])
+        return 2
+
+    try:
+        preset_name = _v9_resolve_preset(opts["preset"])
+    except ValueError as e:
+        _v9_fatal(str(e), notify=opts["notify"])
+        return 2
+
+    pr = PRESETS[preset_name]
+    mode = pr["mode"]
+    quality = int(pr.get("quality", 85))
+    max_side = int(pr.get("max_side", 0))
+    keep_exif = bool(pr.get("keep_exif", False))
+    target_kb = int(pr.get("target_kb", 0))
+    fmt_arg = opts["format"] or pr.get("format", "keep")
+
+    try:
+        out_root = Path(opts["out"]).expanduser() if opts["out"] else (Path.home() / V9_DEFAULT_OUT)
+        out_root = out_root.resolve()
+        out_root.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _v9_fatal(f"输出目录建不了: {e}", notify=opts["notify"])
+        return 2
+
+    total_bytes = 0
+    for f in files:
+        try:
+            total_bytes += f.stat().st_size
+        except OSError:
+            pass
+
+    try:
+        import time as _time
+        _v9_log(f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] preset={preset_name} "
+                f"mode={mode} fmt={fmt_arg} n={len(files)} -> {out_root}")
+    except Exception:
+        _v9_log(f"preset={preset_name} mode={mode} fmt={fmt_arg} n={len(files)} -> {out_root}")
+
+    # 脚本 / 测试模式: 不开窗, 直接跑完并把结果打到控制台
+    if not opts["notify"]:
+        results = _v9_compress_all(files, out_root, mode, quality, fmt_arg,
+                                   max_side, keep_exif, target_kb)
+        _v9_print(_v9_report_text(results, out_root, preset_name))
+        return _v9_rc(results)
+
+    holder: dict = {}
+    try:
+        root = tk.Tk()
+    except Exception as e:
+        _v9_fatal(f"起不了窗口: {e}", notify=False)
+        return 2
+    _v9_style(root)
+    _v9_icon(root)
+    root.title("图瘦身 v9 — 正在压缩")
+
+    outer = ttk.Frame(root, padding=18)
+    outer.pack(fill="both", expand=True)
+    ttk.Label(outer, text=f"预设: {preset_name}",
+              font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
+    ttk.Label(outer, text=pr["desc"],
+              font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(2, 8))
+    ttk.Label(outer, text=f"{len(files)} 张图 · 共 {human_size(total_bytes)}",
+              font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+
+    bar = ttk.Progressbar(outer, mode="indeterminate")
+    bar.pack(fill="x", pady=10)
+    bar.start(12)
+    cnt = ttk.Label(outer, text=f"0 / {len(files)}", font=("Microsoft YaHei UI", 9))
+    cnt.pack(anchor="w")
+    ttk.Label(outer, text=f"输出到: {out_root}",
+              font=("Microsoft YaHei UI", 8), foreground="#666").pack(anchor="w", pady=(10, 0))
+    root.geometry(_v9_geometry(root, 520, 260))
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+
+    def on_tick(n):
+        cnt.config(text=f"{n} / {len(files)}")
+
+    def worker():
+        res = _v9_compress_all(
+            files, out_root, mode, quality, fmt_arg, max_side, keep_exif, target_kb,
+            on_done=lambda n: root.after(0, lambda n=n: on_tick(n)))
+        holder["results"] = res
+
+        def show():
+            try:
+                bar.stop()
+            except Exception:
+                pass
+            _v9_result_ui(root, res, out_root, preset_name)
+
+        root.after(0, show)
+
+    threading.Thread(target=worker, daemon=True).start()
+    root.mainloop()
+    return _v9_rc(holder.get("results", []))
+
+
+def _v9_show_help(notify: bool) -> None:
+    if not notify:
+        _v9_print(V9_USAGE)
+        return
+    try:
+        root = tk.Tk()
+        _v9_icon(root)
+        _v9_style(root)
+        root.title("图瘦身 v9 — 用法")
+        outer = ttk.Frame(root, padding=14)
+        outer.pack(fill="both", expand=True)
+        txt = tk.Text(outer, font=("Consolas", 9), wrap="none", width=76)
+        txt.insert("1.0", V9_USAGE)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True)
+        root.geometry("760x520")
+        ttk.Button(root, text="关闭", command=root.destroy).pack(pady=(0, 10))
+        root.mainloop()
+    except Exception:
+        _v9_print(V9_USAGE)
+
+
+def _v9_show_presets(notify: bool) -> None:
+    lines = [f"共 {len(PRESETS)} 个预设 (快捷入口默认沿用 GUI 里你最后手动选的那个):", ""]
+    for i, (name, p) in enumerate(PRESETS.items(), 1):
+        lines.append(f"{i}. {name}")
+        lines.append(f"   {p['desc']}")
+    text = "\n".join(lines)
+    if not notify:
+        _v9_print(text)
+        return
+    try:
+        root = tk.Tk()
+        _v9_icon(root)
+        _v9_style(root)
+        root.title("图瘦身 v9 — 预设清单")
+        outer = ttk.Frame(root, padding=14)
+        outer.pack(fill="both", expand=True)
+        txt = tk.Text(outer, font=("Consolas", 10), wrap="word", width=66)
+        txt.insert("1.0", text)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True)
+        root.geometry("700x480")
+        ttk.Button(root, text="关闭", command=root.destroy).pack(pady=(0, 10))
+        root.mainloop()
+    except Exception:
+        _v9_print(text)
+
+
+# ============================================================
+#  V9 安装 / 卸载
+#  (install.bat / uninstall.bat 只是两个 ASCII 空壳, 真正的活儿在这儿)
+# ============================================================
+#  为什么不让批处理直接干这些活:
+#    中文 .bat 文件在非 936 控制台码页下会被 cmd 按错码页解读, 多字节字符
+#    被当成特殊字符, 轻则乱码重则整行报错。chcp 也救不了 —— 码页切换发生在
+#    文件被读取之后。而注册表键名 / 快捷方式名 / 真实桌面路径都带中文。
+#    把它们交给 Python 就完全没有编码歧义: Unicode 走 Win32 API, 不经过码页。
+#
+#  顺带把 exe 文件名改成 ASCII 的 PicShrink.exe, 这样批处理引用它也不会出事。
+
+V9_APP_TITLE = "图瘦身 (PicShrink) v9"
+V9_FOLDER_NAME = "图瘦身"
+V9_MENU_NAME = "用图瘦身处理"
+V9_MENU_NAME_DIR = "用图瘦身压缩这个文件夹"
+V9_SHORTCUT_NAME = "图瘦身.lnk"
+
+# FOLDERID_Desktop —— 问 Windows 要真实桌面路径。
+# 不能用 %USERPROFILE%\Desktop: 桌面可以被重定向到别的盘(本机就是 D:\Desktop),
+# 写死会在很多电脑上把图标丢到一个没人看的目录里。
+_FOLDERID_DESKTOP = "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}"
+
+
+def _v9_install_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or ""
+    root = Path(base) if base else Path.home()
+    return root / V9_FOLDER_NAME
+
+
+def _v9_self_exe() -> Path:
+    """当前这个 exe 的真实路径 (打包后就是它自己)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable)
+    return Path(sys.argv[0]).resolve()
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _v9_parse_guid(s: str):
+    """把 "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}" 这种字符串变成 GUID 结构体.
+
+    ctypes.c_void_p("...") 会直接抛 TypeError —— 它只吃整数/地址。
+    所以必须自己按 GUID 的二进制布局拆, 再把地址交给 Win32。
+    """
+    s = s.strip().strip("{}")
+    # GUID 是 8-4-4-4-12 五段: 前三段进 Data1/2/3,
+    # 后两段拼起来才是完整的 16 个十六进制字符 (Data4)
+    p = s.split("-")
+    if len(p) < 5:
+        raise ValueError("GUID 格式不对: " + s)
+    tail = p[3] + p[4]
+    d1 = int(p[0], 16)
+    d2 = int(p[1], 16)
+    d3 = int(p[2], 16)
+    d4 = [int(tail[i:i + 2], 16) for i in range(0, 16, 2)]
+    return _GUID(d1, d2, d3, (ctypes.c_ubyte * 8)(*d4))
+
+
+def _known_desktop() -> Path:
+    """真实桌面目录 (尊重用户重定向). 拿不到就退回 %USERPROFILE%\\Desktop."""
+    try:
+        guid = _v9_parse_guid(_FOLDERID_DESKTOP)
+        buf = ctypes.c_void_p()
+        fn = ctypes.windll.shell32.SHGetKnownFolderPath
+        fn.argtypes = [ctypes.POINTER(_GUID), wintypes.DWORD, wintypes.HANDLE,
+                       ctypes.POINTER(ctypes.c_void_p)]
+        fn.restype = ctypes.c_long
+        hr = fn(ctypes.byref(guid), 0, None, ctypes.byref(buf))
+        if hr == 0 and buf:
+            try:
+                return Path(ctypes.wstring_at(buf))
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(buf)
+    except Exception:
+        pass
+    # API 拿不到就读注册表 —— Explorer 自己就是从这儿读的
+    try:
+        import winreg
+        k = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+        try:
+            val = winreg.QueryValueEx(k, "Desktop")[0]
+        finally:
+            winreg.CloseKey(k)
+        expanded = Path(os.path.expandvars(val))
+        if expanded.is_dir():
+            return expanded
+    except Exception:
+        pass
+    return Path.home() / "Desktop"
+
+
+def _refresh_shell() -> None:
+    """通知资源管理器"关联项变了", 让右键菜单立刻出现, 不用重启 explorer."""
+    try:
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_IDLIST = 0x0000
+        ctypes.windll.shell32.SHChangeNotify(
+            SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
+
+
+def _make_lnk(target: Path, lnk_path: Path, icon: str, desc: str) -> bool:
+    """建 .lnk 快捷方式.
+
+    用 PowerShell 的 WScript.Shell。参数不走命令行 —— 路径里可能有空格,
+    而且中文路径经 argv 传递后再拼进脚本很容易被二次解释, 所以改用环境变量,
+    PowerShell 那边只读 $env:, 彻底绕开转义问题。
+    """
+    try:
+        lnk_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    env = dict(os.environ)
+    env.update({
+        "PS_LNK_PATH": str(lnk_path),
+        "PS_LNK_TARGET": str(target),
+        "PS_LNK_WORKDIR": str(target.parent),
+        "PS_LNK_ICON": icon,
+        "PS_LNK_DESC": desc,
+    })
+    ps = (
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:PS_LNK_PATH);"
+        "$s.TargetPath=$env:PS_LNK_TARGET;"
+        "$s.WorkingDirectory=$env:PS_LNK_WORKDIR;"
+        "$s.IconLocation=$env:PS_LNK_ICON;"
+        "$s.Description=$env:PS_LNK_DESC;"
+        "$s.Save()"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", ps],
+            env=env, capture_output=True, timeout=90)
+        return lnk_path.is_file()
+    except Exception:
+        return False
+
+
+def _v9_box(title: str, msg: str, error: bool = False, ask: bool = False) -> bool:
+    """弹结果窗. ask=True 时返回用户点的是"是"."""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        _v9_icon(root)
+        if ask:
+            return bool(messagebox.askyesno(title, msg, parent=root))
+        messagebox.showerror(title, msg, parent=root) if error else \
+            messagebox.showinfo(title, msg, parent=root)
+        return True
+    except Exception:
+        return False
+
+
+def _v9_install_step(n: int, total: int, text: str, lines: list[str]) -> None:
+    lines.append(f"[{n}/{total}] {text}")
+
+
+def v9_install(quiet: bool = False) -> int:
+    """装上右键菜单 / 发送到 / 桌面快捷方式. 返回退出码."""
+    import shutil
+    import winreg
+
+    exe = _v9_self_exe()
+    dest = _v9_install_dir()
+    lines: list[str] = []
+
+    if not exe.is_file():
+        _v9_log("[install] 找不到主程序: " + str(exe))
+        if not quiet:
+            _v9_box(V9_APP_TITLE, f"安装失败: 找不到主程序\n{exe}")
+        return 1
+
+    # 1) 复制主程序 (原 exe 作为安装源)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        dst_exe = dest / exe.name
+        if not dst_exe.is_file() or exe.resolve() != dst_exe.resolve():
+            shutil.copy2(exe, dst_exe)
+        # 图标: 打包的单文件 exe 内部自带一份, 另存一份出来给右键菜单/快捷方式用
+        ico_src = Path(getattr(sys, "_MEIPASS", "")) / "app.ico" \
+            if getattr(sys, "_MEIPASS", "") else Path(__file__).resolve().parent / "app.ico"
+        if ico_src.is_file():
+            shutil.copy2(ico_src, dest / "app.ico")
+    except Exception as e:
+        _v9_log(f"[install] 复制失败: {e}")
+        if not quiet:
+            _v9_box(V9_APP_TITLE,
+                    f"安装失败: 复制主程序出错\n{e}\n\n"
+                    f"如果图瘦身正在运行, 请先关掉再装。")
+        return 1
+    _v9_install_step(1, 5, f"主程序: {dst_exe}", lines)
+
+    icon = f"{dest / 'app.ico'},0" if (dest / "app.ico").is_file() else str(dst_exe)
+    cmd = f'"{dst_exe}" "%1"'
+    try:
+        # 2) 图片右键菜单
+        k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                               "Software\\Classes\\*\\shell\\" + V9_MENU_NAME,
+                               0, winreg.KEY_ALL_ACCESS)
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME)
+        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
+        # MultiSelectModel=Single 才是多选的关键:
+        #   Single   多选时只启动一次, 全部选中项一起作为 %1 传进来
+        #   Player   每张图各启动一次 (等于没批量)
+        #   Document 只在单选时才出现
+        winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Single")
+        c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
+        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(c)
+        winreg.CloseKey(k)
+        _v9_install_step(2, 5, "图片右键菜单 (支持多选)", lines)
+
+        # 3) 文件夹右键菜单
+        k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                               "Software\\Classes\\Directory\\shell\\" + V9_MENU_NAME,
+                               0, winreg.KEY_ALL_ACCESS)
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME_DIR)
+        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
+        c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
+        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(c)
+        winreg.CloseKey(k)
+        _v9_install_step(3, 5, "文件夹右键菜单 (自动递归)", lines)
+    except Exception as e:
+        _v9_log(f"[install] 注册表失败: {e}")
+        if not quiet:
+            _v9_box(V9_APP_TITLE, f"安装失败: 写注册表出错\n{e}")
+        return 1
+
+    # 4) 发送到
+    sendto = Path(os.environ.get("APPDATA", str(Path.home()))) / \
+        "Microsoft/Windows/SendTo"
+    ok_send = _make_lnk(dst_exe, sendto / V9_SHORTCUT_NAME, icon, "用图瘦身压缩图片")
+    _v9_install_step(4, 5, "发送到 -> 图瘦身" if ok_send else "发送到 -> 图瘦身 (失败)", lines)
+
+    # 5) 桌面快捷方式
+    desk = _known_desktop()
+    ok_desk = _make_lnk(dst_exe, desk / V9_SHORTCUT_NAME, icon, "打开图瘦身图形界面")
+    _v9_install_step(5, 5,
+                     f"桌面快捷方式: {desk}" if ok_desk else "桌面快捷方式: 失败", lines)
+
+    _refresh_shell()
+    out_dir = Path.home() / V9_DEFAULT_OUT
+    summary = "\n".join(lines) + f"\n\n输出目录: {out_dir}\n原图永不覆盖。"
+    _v9_log("[install] 完成\n" + summary)
+
+    if not quiet:
+        _v9_box(V9_APP_TITLE,
+                f"安装完成!\n\n{summary}\n\n"
+                "用法:\n"
+                f"  1. 选中图片右键 -> {V9_MENU_NAME} (可多选)\n"
+                f"  2. 右键文件夹 -> {V9_MENU_NAME_DIR}\n"
+                "  3. 右键 -> 发送到 -> 图瘦身\n"
+                "  4. 双击桌面 图瘦身 -> 完整界面\n\n"
+                "右键菜单没出现就按 F5 或重开文件夹窗口。\n"
+                "卸载: 运行 uninstall.bat")
+    return 0
+
+
+def _v9_del_key(root, path: str) -> bool:
+    import winreg
+    try:
+        k = winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS)
+    except FileNotFoundError:
+        return False
+    # 先删子键再删父键, DeleteKey 不递归
+    i = 0
+    while True:
+        try:
+            sub = winreg.EnumKey(k, i)
+        except OSError:
+            break
+        _v9_del_key(root, path + "\\" + sub)
+        i += 1
+    winreg.CloseKey(k)
+    try:
+        winreg.DeleteKey(root, path)
+        return True
+    except OSError:
+        return False
+
+
+def v9_uninstall(quiet: bool = False) -> int:
+    """卸掉右键菜单 / 发送到 / 桌面快捷方式. 返回退出码."""
+    import winreg
+
+    lines: list[str] = []
+    removed = 0
+    for path in ("Software\\Classes\\*\\shell\\" + V9_MENU_NAME,
+                 "Software\\Classes\\Directory\\shell\\" + V9_MENU_NAME):
+        ok = _v9_del_key(winreg.HKEY_CURRENT_USER, path)
+        lines.append(("已移除" if ok else "本来就没有") + ": " + path.split("\\")[-1])
+        removed += int(ok)
+
+    sendto = Path(os.environ.get("APPDATA", str(Path.home()))) / \
+        "Microsoft/Windows/SendTo"
+    lnk_send = sendto / V9_SHORTCUT_NAME
+    try:
+        lnk_send.unlink(missing_ok=True)
+        lines.append(f"已移除: 发送到 -> 图瘦身")
+    except OSError:
+        lines.append("发送到 -> 图瘦身: 删除失败")
+
+    desk = _known_desktop()
+    lnk_desk = desk / V9_SHORTCUT_NAME
+    try:
+        lnk_desk.unlink(missing_ok=True)
+        lines.append(f"已移除: 桌面快捷方式 ({desk})")
+    except OSError:
+        lines.append("桌面快捷方式: 删除失败")
+
+    _refresh_shell()
+
+    dest = _v9_install_dir()
+    if dest.exists():
+        if quiet:
+            keep = True
+        else:
+            keep = not _v9_box(
+                V9_APP_TITLE,
+                f"要删掉安装目录吗?\n\n{dest}\n\n"
+                f"你的压缩结果不会被删(在 {Path.home() / V9_DEFAULT_OUT})。\n\n"
+                "点\"是\"删除, 点\"否\"保留。",
+                ask=True)
+        if keep:
+            lines.append(f"保留安装目录: {dest}")
+        else:
+            import shutil
+            try:
+                shutil.rmtree(dest)
+                lines.append(f"已删除安装目录: {dest}")
+            except OSError as e:
+                lines.append(f"删除安装目录失败 ({e}), 请关掉图瘦身后重试")
+
+    summary = "\n".join(lines)
+    _v9_log(f"[uninstall] 完成\n{summary}")
+    if not quiet:
+        _v9_box(V9_APP_TITLE,
+                f"卸载完成\n\n{summary}\n\n"
+                f"你的压缩结果还留着, 没动:\n{Path.home() / V9_DEFAULT_OUT}\n\n"
+                "右键菜单如果还看得到, 按 F5 或重开文件夹窗口就会消失。")
+    return 0
+
+
+def main(preload: list[Path] | None = None):
     # v6: 用 tkinterdnd2 的 Tk 替换原生 tk.Tk, 才能让 listbox 接 OS 文件拖拽
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     try:
@@ -991,9 +1906,33 @@ def main():
             style.theme_use("clam")
     except Exception:
         pass
-    App(root)
+    app = App(root)
+    # --gui 入口: 把命令行带来的图预载进待压缩列表, 让用户自己点"开始压缩"
+    if preload:
+        try:
+            app._add_paths(preload)
+        except Exception:
+            pass
     root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    _argv = sys.argv[1:]
+    _opts, _paths = _v9_parse(_argv)
+    if not _argv:
+        main()                                    # 双击 exe → 完整 GUI
+    elif _opts["install"]:
+        sys.exit(v9_install(quiet=_opts["quiet"]))
+    elif _opts["uninstall"]:
+        sys.exit(v9_uninstall(quiet=_opts["quiet"]))
+    elif _opts["help"]:
+        _v9_show_help(_opts["notify"])
+    elif _opts["list_presets"]:
+        _v9_show_presets(_opts["notify"])
+    elif _opts["gui"]:
+        _pre = _v9_expand(_paths)
+        if not _pre:
+            _pre = [Path(x) for x in _paths if Path(x.strip().strip('"')).exists()]
+        main(preload=_pre)
+    else:
+        sys.exit(_v9_quick(_paths, _opts))        # 右键 / SendTo / 拖到图标

@@ -25,6 +25,17 @@ _test_min.py
 build_tmp/
 build/
 *.spec
+# 但图瘦身.spec 是手写的构建配置, README 让人照着打包, 必须入库
+!图瘦身.spec
+
+# 发布辅助脚本 (一次性用, 不属于产品)
+_publish_release.ps1
+_release_args*.json
+_pkg_v9/
+_clean_v9.py
+_pack_v9.py
+_write_bat.py
+_fix_bat.py
 
 # 调试日志 (Flet 启动报错、stdout 抓取)
 flet*.txt
@@ -55,3 +66,5 @@ desktop.ini
 # 发布产物 (压到 _release_assets/, 拷到 GitHub Release 用, 不入库)
 _release_assets/
 _portable_staging/
+# 便携 ZIP 只是 exe + bat + ico 的容器, 体积和 exe 重复, 不入库
+dist/*.zip

@@ -26,17 +26,54 @@
 ## 30 秒上手
 
 ```text
-1. 下载 releases 里最新的「图瘦身-v8-portable.zip」
+1. 下载 releases 里最新的「PicShrink-v9-portable.zip」
 2. 解压到任意文件夹
-3. 双击里面的「图瘦身.exe」
-4. 用 Windows 资源管理器把图片拖进窗口
-5. 点蓝色「▶ 开始压缩」
+3. 想装右键菜单 → 双击「install.bat」；只想用 → 直接双击「PicShrink.exe」
+4. 装完后：选中图片右键 → 「用图瘦身处理」（可多选）
+5. 或者双击桌面上的「图瘦身」打开完整界面，拖图进去压
 6. 去「输出」框指向的目录收成品
 ```
 
 不需要装 Python。只需要 Win 10 / 11 64 位。
 
 > 首次双击 Windows 可能弹「Windows 已保护你的电脑」（SmartScreen），点 **更多信息 → 仍要运行** 即可。我们的 exe 没做代码签名，这是已知限制，不是 bug。
+
+---
+
+## v9：右键就能压，不用先拖进来
+
+装好之后，图片压缩这件事**根本不用打开主界面**：
+
+| 你做的事 | 结果 |
+|---|---|
+| 右键一张图 → 「用图瘦身处理」| 直接压这一张 |
+| **选中多张图** → 右键 →「用图瘦身处理」| **一次全压完**，一张一个窗口都不会多弹 |
+| 右键一个文件夹 →「用图瘦身压缩这个文件夹」| 递归扫整个文件夹，一次压完 |
+| 右键任意文件 → 发送到 →「图瘦身」| 同上，SendTo 的经典用法 |
+
+快捷入口走的是**和界面完全相同的 7 预设引擎**，不是另一套简化逻辑。你在界面里手动选过预设之后，右键入口会记住它（存 `%LOCALAPPDATA%\图瘦身\quick.json`）；没手动选过时默认用「⚡ 推荐压缩」。
+
+压缩过程会弹一个进度窗，压完弹结果窗（成功 / 跳过 / 失败各几张、省了多少、输出在哪），结果窗上有「打开输出目录」和「全部重压一遍」，8 秒不操作会自动关掉。
+
+**快捷入口的输出位置**是 `%USERPROFILE%\picshrink_out\`，按源文件夹分层：
+
+```text
+%USERPROFILE%\picshrink_out\实拍图\01.jpg
+%USERPROFILE%\picshrink_out\旅行照片\02.jpg
+```
+
+所以**同名图片放在不同文件夹里不会互相覆盖**——它们各自落到自己文件夹名下面。**原图在任何路径下都不会被改动或覆盖。**
+
+### 安装 / 卸载
+
+| 文件 | 干什么 |
+|---|---|
+| `install.bat` | 装右键菜单（图片 / 文件夹）、SendTo、桌面快捷方式 |
+| `uninstall.bat` | 卸掉上面这些；**已压好的图片一律保留**，还会问你要不要删安装目录 |
+
+安装只写 `HKCU`，不碰系统级注册表，不需要管理员权限，只对当前这个 Windows 账号生效。装完在资源管理器里按一下 `F5` 右键菜单就出现。
+
+> `install.bat` / `uninstall.bat` 内部是**纯 ASCII**，一个中文都没有。所有中文提示都由 exe 自己弹窗。这样做是因为 `.bat` 会被 cmd 按控制台码页解析，中文脚本在部分机器上会被切乱码导致连 exe 都找不到。
 
 ---
 
@@ -153,19 +190,15 @@ ImageChops.difference(a, b).getbbox() is None
 # 一次性
 C:\Python314\python.exe -m pip install --upgrade pyinstaller pillow tkinterdnd2
 
-# 打包 (在项目根目录)
-C:\Python314\python.exe -m PyInstaller --onefile --noconsole ^
-  --name 图瘦身 ^
-  --icon app.ico ^
-  --add-data "app.ico;." ^
-  --collect-all tkinterdnd2 ^
-  --collect-submodules tkinterdnd2 ^
-  compress_images_gui.py
+# 打包 (在项目根目录, 用仓库自带的 spec)
+C:\Python314\python.exe -m PyInstaller 图瘦身.spec
 
-# 产物: dist\图瘦身.exe
+# 产物: dist\PicShrink.exe
 ```
 
-`--collect-all tkinterdnd2` 和 `--add-data "app.ico;."` 都是必须的：前者保证 tkdnd 的 tcl/dll 进 onefile，后者让运行时读得到品牌图标。
+`图瘦身.spec` 里 `collect_all tkinterdnd2` 和 `datas = [('app.ico', '.')]` 都是必须的：前者保证 tkdnd 的 tcl/dll 进 onefile，后者让运行时读得到品牌图标、也让安装器能把图标取出来给右键菜单用。
+
+exe 文件名定成 ASCII 的 `PicShrink` 而不是中文，就是为了让 `install.bat` / `uninstall.bat` 能稳定引用它（见上面「安装 / 卸载」那条）。中文品牌留在界面、快捷方式和右键菜单显示名里。
 
 ---
 
@@ -173,17 +206,30 @@ C:\Python314\python.exe -m PyInstaller --onefile --noconsole ^
 
 | 文件 | 作用 |
 |---|---|
-| `compress_images_gui.py` | **图瘦身 (PicShrink) v8 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标 |
+| `compress_images_gui.py` | **图瘦身 (PicShrink) v9 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标、v9 快捷入口与安装/卸载 |
 | `app.ico` | 品牌图标（256/128/64/48/32/16 多尺寸），打包时嵌入 exe |
-| `app.png` | 256x256 品牌图标（PNG 版本） |
+| `图瘦身.spec` | PyInstaller 打包配置（`--collect-all tkinterdnd2` + 嵌入 app.ico）|
+| `install.bat` / `uninstall.bat` | v9 纯 ASCII 安装 / 卸载壳，转调 `PicShrink.exe --install` / `--uninstall` |
 | `compress_images.py` | 命令行等价入口（同款 7 预设 + 目标体积模式）|
 | `_jpeg_strip.py` | JPEG 无损优化器（纯 Python，替代 jpegoptim）|
-| `dist/图瘦身.exe` | 打包好的单文件可执行（约 19.5 MB）|
+| `dist/PicShrink.exe` | 打包好的单文件可执行（约 19.6 MB）|
 | `_shots/` | 截图存档 |
 
 ---
 
 ## 历史 & 版本
+
+### v9 — 右键快捷入口 + 安装器（2026-10）
+
+- **资源管理器右键菜单**：图片右键（`MultiSelectModel=Single`，**多选一次压完**）、文件夹右键（自动递归）
+- **SendTo 条目** + **桌面快捷方式**，桌面路径走 Windows Known Folder API，**尊重用户把桌面重定向到别的盘**
+- 新增 `install.bat` / `uninstall.bat` + `--install` / `--uninstall`；只写 `HKCU`，不需要管理员
+- exe 文件名改 ASCII `PicShrink.exe`，中文品牌留在界面 / 快捷方式 / 右键显示名
+- 快捷入口改为**复用界面的 7 预设引擎**（此前走的是旧 CLI 的 `format=auto` / WebP 默认 / `max-side=2560` 那一套，已废弃）
+- 快捷入口默认预设跟随你在界面里最后一次手动选择（`%LOCALAPPDATA%\图瘦身\quick.json`），没选过则用「⚡ 推荐压缩」
+- windowed exe 自绘进度窗 + 结果窗，错误同时落到 `%TEMP%\picshrink_v9.log`
+- v7/v8 的压缩引擎与 7 预设行为**完全不变**
+- 回归：源码 28/28、打包 exe 15/15、安装器端到端 36/36
 
 ### v8 — 品牌「图瘦身」+ 蓝青图标（2026-10）
 
@@ -217,16 +263,17 @@ v4 = Tkinter 旧版基线（不能拖图）。v3 之前是命令行版 + 拖 BAT
 ## 已知小坑（不影响功能）
 
 - **没做代码签名** → 第一次双击 Windows SmartScreen 会拦一下，点「更多信息 → 仍要运行」即可。
-- **中文文件名 exe** 在纯英文 Windows 上极少数情况可能展示成乱码备选名（不影响功能）。
+- **全局自定义快捷键暂未提供**。v9 走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面图标这四条路，都是官方支持的机制。做成「任意界面按一个全局热键就压缩当前选中的图」需要常驻进程 + 读 Explorer 选中项 + 托盘 + 开机自启，属于 v9.1 的范围。
+- **`install.bat` 必须是纯 ASCII**。这是踩过坑之后定的：cmd 按活动控制台码页解析 `.bat`，中文脚本在码页不匹配时会被切乱码。中文提示一律由 exe 弹窗。
 
 ---
 
 ## License
 
-MIT
+MIT — 完整文本见 [LICENSE](LICENSE)。
 
 ---
 
 ## English
 
-PicShrink (图瘦身 / "slim-down pictures") is a fully-local image compressor for Windows. Drop pictures into the window, pick a preset, click start. Seven presets including two target-size presets (≤200KB / ≤120KB with auto binary-search quality). Two lossless presets produce mathematically pixel-identical output (verified via `ImageChops.difference(a,b).getbbox() is None`). No upload, no telemetry, no network after launch. Single-file `.exe` (~19MB), no Python install required. Win 10/11 64-bit. MIT.
+PicShrink (图瘦身 / "slim-down pictures") is a fully-local image compressor for Windows. v9 adds Explorer integration: right-click any picture (or multi-select many) → compress; right-click a folder → compress recursively; SendTo entry and desktop shortcut. The quick entry reuses the exact same seven-preset engine as the GUI. Seven presets including two target-size presets (≤200KB / ≤120KB with auto binary-search quality). Two lossless presets produce mathematically pixel-identical output (verified via `ImageChops.difference(a,b).getbbox() is None`). No upload, no telemetry, no network after launch. Single-file `.exe` (~19.6MB), no Python install required. Win 10/11 64-bit. MIT.
