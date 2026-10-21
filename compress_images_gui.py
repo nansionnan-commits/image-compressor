@@ -21,6 +21,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+# v6: 加 tkinterdnd2 接 OS 文件拖拽, 缺失就降级到按钮选文件
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+    TkinterDnD = None  # type: ignore
+    DND_FILES = None  # type: ignore
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -234,9 +243,9 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("图片一键压缩 (v4 jpegoptim 集成)")
-        root.geometry("980x720")
-        root.minsize(880, 660)
+        root.title("图片一键压缩 v6 (可把图片/文件夹直接拖进窗口)")
+        root.geometry("1000x880")
+        root.minsize(920, 720)
 
         self.files: list[Path] = []
         self.out_dir: Path = Path("compressed").resolve()
@@ -260,10 +269,19 @@ class App:
         self.file_label = ttk.Label(top, text="已选 0 张图", foreground="#666")
         self.file_label.pack(side="right")
 
-        list_frame = ttk.LabelFrame(left, text="待压缩文件 (可多次选, 累加)", padding=4)
+        list_frame = ttk.LabelFrame(left, text="待压缩文件 (可拖图片/文件夹进窗口, 也可多次按钮选, 累加)", padding=4)
         list_frame.pack(fill="x", pady=4)
         self.listbox = tk.Listbox(list_frame, height=4, font=("Consolas", 9))
         self.listbox.pack(fill="x")
+        # v6: 接 OS 文件拖拽, 整个根窗口都能拖进来
+        if HAS_DND:
+            try:
+                self.listbox.drop_target_register(DND_FILES)
+                self.listbox.dnd_bind("<<Drop>>", self._on_drop)
+                self.root.drop_target_register(DND_FILES)
+                self.root.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
 
         preset_frame = ttk.LabelFrame(left, text="★ 一键预设 (默认=推荐压缩 q=85)", padding=6)
         preset_frame.pack(fill="x", pady=4)
@@ -328,6 +346,7 @@ class App:
 
         outf = ttk.Frame(left, padding=(0, 6, 0, 0))
         outf.pack(fill="x")
+        self.out_frame = outf  # 记住, 自定义面板要插在它前面
         ttk.Label(outf, text="输出:").pack(side="left")
         self.out_var = tk.StringVar(value=str(self.out_dir))
         ttk.Entry(outf, textvariable=self.out_var, font=("Consolas", 9)).pack(
@@ -358,7 +377,7 @@ class App:
 
         # ===== 右侧: 预览 =====
         right = ttk.Frame(paned, padding=(8, 0, 0, 0))
-        paned.add(right, weight=2)
+        paned.add(right, weight=4)
 
         ttk.Label(right, text="🔍 实时参数预览", font=("Microsoft YaHei", 11, "bold")).pack(anchor="w", pady=(0, 4))
 
@@ -366,7 +385,8 @@ class App:
         prev_info.pack(fill="x", pady=4)
         self.prev_sample_name = ttk.Label(prev_info, text="(未选图)", foreground="#666", wraplength=240)
         self.prev_sample_name.pack(anchor="w")
-        self.prev_sample_size = ttk.Label(prev_info, text="", font=("Consolas", 9))
+        self.prev_sample_size = ttk.Label(prev_info, text="", font=("Consolas", 9),
+                                          wraplength=250)
         self.prev_sample_size.pack(anchor="w", pady=(2, 0))
 
         prev_size_frame = ttk.LabelFrame(right, text="按当前参数预估", padding=8)
@@ -382,7 +402,8 @@ class App:
 
         prev_settings_frame = ttk.LabelFrame(right, text="当前参数", padding=8)
         prev_settings_frame.pack(fill="x", pady=4)
-        self.prev_settings = ttk.Label(prev_settings_frame, text="", font=("Consolas", 9), justify="left")
+        self.prev_settings = ttk.Label(prev_settings_frame, text="", font=("Consolas", 9),
+                                           justify="left", wraplength=260)
         self.prev_settings.pack(anchor="w")
 
         ttk.Label(
@@ -403,8 +424,8 @@ class App:
 
     def _toggle_custom(self):
         if self.show_custom.get():
-            # 插到 outf 之前
-            self.custom_frame.pack(fill="x", padx=0, pady=4, before=self.out_var.master.master.slaves()[0])
+            # 插到输出目录栏前面 (靠 self.out_frame 定位, 别用 out_var.master)
+            self.custom_frame.pack(fill="x", padx=0, pady=4, before=self.out_frame)
         else:
             self.custom_frame.pack_forget()
 
@@ -442,13 +463,58 @@ class App:
         )
         if not paths:
             return
+        self._add_paths([Path(p) for p in paths])
+
+    def _add_paths(self, paths: list[Path]):
+        """把一批路径加进队列, 文件夹会递归展平. 拖拽也走这里."""
+        added = 0
         for p in paths:
-            pp = Path(p)
-            if pp.suffix.lower() in SUPPORTED and pp not in self.files:
-                self.files.append(pp)
-        self._refresh_list()
-        self._refresh_preview()
-        self.status.config(text=f"已选 {len(self.files)} 张图")
+            if p.is_dir():
+                for sub in sorted(p.rglob("*")):
+                    if sub.is_file() and sub.suffix.lower() in SUPPORTED and sub not in self.files:
+                        self.files.append(sub)
+                        added += 1
+            elif p.is_file() and p.suffix.lower() in SUPPORTED and p not in self.files:
+                self.files.append(p)
+                added += 1
+        if added:
+            self._refresh_list()
+            self._refresh_preview()
+            self.status.config(text=f"已选 {len(self.files)} 张图 (+{added})")
+        elif self.files:
+            self.status.config(text=f"已选 {len(self.files)} 张图 (拖入无新文件)")
+
+    def _on_drop(self, event):
+        """tkinterdnd2 <<Drop>> 回调.
+
+        tkdnd 在 Windows 上送来的 data 是 Tcl 列表字面量:
+        带空格的路径会用花括号包起来, 如 '{C:/My Pictures/a b.jpg} {C:/x.png}'.
+        用 tk.splitlist 解析最稳 (同时处理花括号、反斜杠转义、无空格裸路径);
+        万一 tkdnd 送的不是合法 Tcl 列表, 再退回正则兜底.
+        """
+        if not HAS_DND:
+            return None
+        raw = getattr(event, "data", "") or ""
+        paths: list[Path] = []
+        try:
+            paths = [Path(p) for p in self.root.tk.splitlist(raw) if p]
+        except Exception:
+            paths = []
+        if not paths:
+            import re
+            parts = re.findall(r"\{([^}]+)\}|(\S+)", raw)
+            paths = [Path(a or b) for a, b in parts if (a or b)]
+        # 过滤掉不存在的路径 (虚拟文件 .lnk / 拖拽残留)
+        paths = [p for p in paths if p.exists()]
+        # 兜底: 万一送来的就是一条裸路径 (带空格却没加花括号), 上面会被切碎成几段垃圾.
+        # 这时把整串当一个路径再试一次, 存在就认.
+        if not paths and raw.strip():
+            whole = Path(raw.strip())
+            if whole.exists():
+                paths = [whole]
+        if paths:
+            self._add_paths(paths)
+        return "copy"
 
     def pick_dir(self):
         d = filedialog.askdirectory(title="选文件夹 (递归压所有图片)")
@@ -532,7 +598,7 @@ class App:
             text=f"{sample.name[:30]}{'...' if len(sample.name) > 30 else ''}",
             foreground="#000")
         self.prev_sample_size.config(
-            text=f"  原: {human_size(src_bytes)}  ·  {w}x{h}px  ·  原图 quality 会被保留")
+            text=f"原: {human_size(src_bytes)}  ·  {w}×{h}px")
         self.prev_arrow.config(text="  按当前参数预估 →")
         self.prev_new.config(text="  压缩中...", foreground="#999")
         self.prev_ratio.config(text="")
@@ -678,7 +744,8 @@ class App:
 
 
 def main():
-    root = tk.Tk()
+    # v6: 用 tkinterdnd2 的 Tk 替换原生 tk.Tk, 才能让 listbox 接 OS 文件拖拽
+    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     try:
         style = ttk.Style()
         if "vista" in style.theme_names():
