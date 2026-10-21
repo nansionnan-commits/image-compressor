@@ -51,3 +51,7 @@ out.log
 # 系统
 Thumbs.db
 desktop.ini
+
+# 发布产物 (压到 _release_assets/, 拷到 GitHub Release 用, 不入库)
+_release_assets/
+_portable_staging/
