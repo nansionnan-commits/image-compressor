@@ -222,8 +222,9 @@ C:\Python314\python.exe -m PyInstaller --onefile --noconsole ^
 
 | 文件 | 作用 |
 |---|---|
-| `compress_images_gui.py` | **v7 入口**（Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、target 模式二分搜索）|
-| `_core.py` | 旧版引擎（v4-v5 时期的 Flet / CLI 共用层，v6 之后实际不再 import；保留以兼容旧参考）|
+| `compress_images_gui.py` | **图瘦身 (PicShrink) v8 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、target 模式二分搜索、应用图标 |
+| `app.ico` | 品牌图标（256/128/64/48/32/16 多尺寸），打包时一并嵌入 exe，由 PyInstaller `--add-data` 提供 |
+| `compress_images.py` | 命令行等价入口（同款 7 预设 + target 模式）|
 | `_jpeg_strip.py` | JPEG 无损优化器（纯 Python，替代 jpegoptim）|
 | `compress_images.py` | 命令行版（拖图到 `compress_images.py` 上）|
 | `dist/ImageCompressor.exe` | 打包好的单文件可执行（约 18.5 MB）|

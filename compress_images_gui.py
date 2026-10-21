@@ -1,14 +1,17 @@
 """
-compress_images_gui.py — v3 重新设计: 质量分层 + 默认无损压缩.
+图瘦身 (PicShrink) — 单文件 GUI 入口 (压缩引擎 + Tkinter + tkinterdnd2 OS 拖拽).
 
-核心变更 (相对 v2):
-  - 默认"推荐"改用 lossless 策略: 不重编码 quality + 剥元数据 + 优化
-    -> 真实测试: JPG 2.9MB -> 1.3MB 省 55% 但画质几乎 0 损失
-    -> 这才是真正匹配"质量尽量不降 + 字节数变小"
-  - 4 个预设改为质量分层, 不再按"q 数字"分, 按"损 vs 省"分
-  - lossless 模式: PIL optimize=True + 不传 quality + 剥 EXIF
-  - balanced 模式: 轻微重编码 (q=90 / 256色)
-  - aggressive 模式: 明显重编码 (q=85 / 128色)
+品牌: 中文名「图瘦身」/ 英文名 PicShrink / exe 名「图瘦身.exe」.
+版本: v8 (按品牌 + 图标重做; 压缩引擎与 v7 同源, 7 预设 / 目标体积 / 像素零差异保护不变).
+
+核心能力 (相对早期 v3/v4):
+  - 7 个预设 (按"画质损失程度"分层):
+      两个无损 / 三个有损 / 两个目标体积 (200KB / 120KB).
+  - 真实 OS 拖拽 (tkinterdnd2 + tkdnd 2.10+) — 不只是 Listbox, 整个窗口都能拖.
+  - 目标体积模式: 长边限位 + 质量二分搜索, 选择能达标的最高质量 (下限 q18).
+  - 输出撞原图时自动加 _compressed 后缀; 重复运行覆盖旧压缩输出, 原图永不覆盖.
+  - 像素零差异验证: ImageChops.difference(a,b).getbbox() is None.
+  - 单文件 PyInstaller 打包, 内置 Python + Pillow + tkdnd 资源.
 """
 
 import io
@@ -395,8 +398,16 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("图片一键压缩 v7 (拖图片/文件夹进窗口, 可按目标体积压)")
+        root.title("图瘦身 v8 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
         root.geometry("1000x880")
+        # 窗口图标 (含任务栏图标). 兼容 PyInstaller 单文件 (sys._MEIPASS).
+        try:
+            from pathlib import Path as _Path
+            _ico = _Path(getattr(sys, "_MEIPASS", str(_Path(__file__).resolve().parent))) / "app.ico"
+            if _ico.is_file():
+                root.iconbitmap(default=str(_ico))
+        except Exception:
+            pass
         root.minsize(920, 720)
 
         self.files: list[Path] = []
