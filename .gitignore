@@ -37,6 +37,10 @@ python_*.log
 dist_*.log
 _t_FLET_*.txt
 _t_WEB_*.txt
+_shots/*.log
+_shots/_*.log
+err.log
+out.log
 
 # 编辑器
 .vscode/

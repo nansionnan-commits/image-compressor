@@ -1,7 +1,16 @@
 """
-_core.py — 压缩引擎 (无 GUI 依赖)
+_core.py — 旧版压缩引擎 (无 GUI 依赖)
 
-compress_images_flet.py 调这里; 桌面版和未来的命令行版共用同一份压缩逻辑。
+⚠️ v6 / v7 已不再 import 此文件
+   - v6 起 `compress_images_gui.py` 把压缩引擎 + `_safe_out_path()` + target 二分搜索
+     都内联进了自己文件, 完全自包含, 没有外部依赖。
+   - v5 的 Flet 版 (`compress_images_flet.py`) 已经回退。
+   - CLI `compress_images.py` 也是独立自包含的 (WebP 默认输出)。
+   本文件仅作历史档案保留, 但 PRESETS 与 GUI 同步在 v6/v7 之间手动对齐过。
+   如果之后又有人需要把 GUI 拆出独立引擎, 直接以 `compress_images_gui.py` 里
+   的 `_safe_out_path / _encode_to_target / compress_one / compress_to_bytes` 为起点
+   复制, 不要从这里继续改 —— 这份的函数体还是 v4 时代的旧路径逻辑, 不支持
+   target 模式与新安全策略。
 """
 
 import io
@@ -20,11 +29,12 @@ except ImportError:
 
 SUPPORTED = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
-# ===== 5 个预设: 按"画质损失程度"分层 =====
+# ===== 7 个预设: 与 compress_images_gui.py 保持一致 =====
 #   lossless    = 纯 Python 剥 EXIF (真 0 损失) + PIL PNG optimize
 #   balanced    = q=85 重编码 (业界甜点)
 #   aggressive  = q=80 重编码 (省最多)
 #   amazon      = jpg 2000px q=85
+#   target      = 先限长边, 再二分搜索质量压到目标字节数以内
 PRESETS = {
     "🎯 无损压缩": {
         "mode": "lossless", "keep_exif": False, "max_side": 0, "format": "keep",
@@ -46,10 +56,20 @@ PRESETS = {
         "mode": "balanced", "keep_exif": False, "max_side": 2000, "format": "jpg",
         "quality": 85, "desc": "2000px JPG 符合 Amazon 主图要求",
     },
+    "📦 主图≤200KB": {
+        "mode": "target", "keep_exif": False, "max_side": 1280, "format": "jpg",
+        "quality": 90, "target_kb": 200, "desc": "长边 1280 + 自动降质量, 压到 ≤200KB",
+    },
+    "📦 主图≤120KB": {
+        "mode": "target", "keep_exif": False, "max_side": 1100, "format": "jpg",
+        "quality": 90, "target_kb": 120, "desc": "长边 1100 + 自动降质量, 压到 ≤120KB",
+    },
 }
 
 MIN_SIZE_SKIP = 50 * 1024
 KEEP_IF_LARGER_RATIO = 0.95
+TARGET_MIN_Q = 18          # 目标大小模式允许降到的最低质量
+LOSSLESS_MIN_SAVED = 1024  # 无损模式至少要省这么多字节才值得另存一个文件
 DEFAULT_OUTPUT_DIR = "compressed"
 
 
