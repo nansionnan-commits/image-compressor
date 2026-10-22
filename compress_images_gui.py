@@ -2,7 +2,7 @@
 图瘦身 (PicShrink) — 单文件 GUI 入口 (压缩引擎 + Tkinter + tkinterdnd2 OS 拖拽).
 
 品牌: 中文名「图瘦身」/ 英文名 PicShrink / exe 名「图瘦身.exe」.
-版本: v9 (加资源管理器右键 / 发送到 快捷入口, 压缩引擎与 v8 完全同一套).
+版本: v11 (透明 PNG 不再崩溃 + 多选右键 + 持久化设置 + 备份可还原).
 
 核心能力 (相对早期 v3/v4):
   - 7 个预设 (按"画质损失程度"分层):
@@ -16,11 +16,14 @@
 
 import ctypes
 import io
+import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import wintypes
@@ -133,14 +136,22 @@ def _safe_out_path(src: Path, out_dir: Path, ext: str) -> Path:
 
 
 def pick_output_format(src: Path, fmt_arg: str) -> tuple[str, str]:
-    """返回 (Pillow 保存格式, 输出扩展名). 'keep' = 保持原格式."""
+    """返回 (Pillow 保存格式, 输出扩展名). 'keep' = 保持原格式.
+
+    v11: 'keep' 改成"看真实内容, 不看后缀".
+      后缀只说明文件叫什么, 内容才决定 Pillow 能不能写.
+      之前只看后缀 -> 一张后缀 .png 内容其实是 TIFF 的图,
+      按 PNG 存就会撞上 "cannot write mode PA as PNG"。
+      现在优先用 Image.open(src).format, 读不出来才退回后缀。
+    """
     if fmt_arg == "keep":
         ext = src.suffix.lower().lstrip(".")
         if ext == "tif":
             ext = "tiff"
-        save_fmt = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG",
-                    "webp": "WEBP", "bmp": "BMP", "tiff": "TIFF"}.get(ext, "JPEG")
-        return save_fmt, src.suffix.lower().lstrip(".") or "jpg"
+        content = _sniff_format(src)
+        if content:
+            return content, _EXT_FOR_FORMAT.get(content, ext or "jpg")
+        return _FMT_FOR_EXT.get(ext, "JPEG"), ext or "jpg"
     if fmt_arg == "auto":
         return pick_output_format(src, "keep")
     if fmt_arg == "jpg":
@@ -148,29 +159,137 @@ def pick_output_format(src: Path, fmt_arg: str) -> tuple[str, str]:
     return fmt_arg.upper(), "jpg" if fmt_arg == "jpg" else fmt_arg
 
 
-def _apply_mode(im: Image.Image, mode: str, fmt: str, quality: int) -> Image.Image:
-    """根据 mode 调整图像 (量化等) + 决定是否传 quality 参数."""
-    has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+# 后缀 -> Pillow 格式
+_FMT_FOR_EXT = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG",
+                "webp": "WEBP", "bmp": "BMP", "tif": "TIFF", "tiff": "TIFF"}
+# Pillow 格式 -> 输出扩展名
+_EXT_FOR_FORMAT = {"JPEG": "jpg", "JPEG2000": "jp2", "PNG": "png",
+                   "WEBP": "webp", "BMP": "bmp", "TIFF": "tiff",
+                   "GIF": "gif", "PPM": "ppm", "ICO": "ico", "TGA": "tga"}
 
-    if fmt == "JPEG" and has_alpha:
-        bg = Image.new("RGB", im.size, (255, 255, 255))
-        im_rgba = im.convert("RGBA")
-        bg.paste(im_rgba, mask=im_rgba.split()[-1])
-        im = bg
+
+def _sniff_format(src: Path) -> str:
+    """读文件头判断真实格式. 读不出来返回 "" (调用方退回后缀)."""
+    try:
+        with Image.open(src) as im:
+            return (im.format or "").upper()
+    except Exception:
+        return ""
+
+
+# ===== 各格式真正能写的 mode (Pillow 12.3 逐个试出来的, 不要凭感觉改) =====
+#   来源: _t_probe_modes.py, 对每个 mode × 格式 实测 save + 回读.
+#   这张表是 _fit_for_format 的唯一依据.
+_SAVE_MODES: dict[str, set[str]] = {
+    # PA / RGBa / La / F / CMYK / YCbCr / HSV 存不进来
+    "PNG":  {"1", "L", "LA", "I", "I;16", "P", "RGB", "RGBA"},
+    # 完全不收 alpha
+    "JPEG": {"L", "RGB", "CMYK", "YCbCr"},
+    "WEBP": {"1", "L", "LA", "P", "PA", "I", "I;16", "F",
+             "RGB", "RGBA", "CMYK", "YCbCr", "HSV"},
+    # BMP 写 RGBA 会丢 alpha, 所以带 alpha 的统一转 RGB
+    "BMP":  {"1", "L", "P", "RGB", "RGBA"},
+    # TIFF 最宽松, 基本原样透传
+    "TIFF": {"1", "L", "LA", "P", "PA", "I", "I;16", "F",
+             "RGB", "RGBA", "CMYK", "YCbCr"},
+}
+
+
+def _has_alpha(im: Image.Image) -> bool:
+    """这张图带不带透明通道 (含调色板里的 tRNS)."""
+    if im.mode in ("RGBA", "RGBa", "LA", "La", "PA"):
+        return True
+    return im.mode == "P" and "transparency" in im.info
+
+
+def _flatten_on_white(im: Image.Image) -> Image.Image:
+    """把透明区域铺成白底 (JPEG / BMP 不支持透明时的唯一出路)."""
+    bg = Image.new("RGB", im.size, (255, 255, 255))
+    rgba = im.convert("RGBA")
+    bg.paste(rgba, mask=rgba.getchannel("A"))
+    return bg
+
+
+def _fit_for_format(im: Image.Image, fmt: str) -> Image.Image:
+    """保证 im 一定能被 save(fmt) 写出去, 而且绝不静默丢 alpha.
+
+    v11 新增。之前没这一层, 两个地方会炸:
+      1) TIFF/JPEG2000 的调色板+alpha (mode=PA) 直接存 PNG -> OSError
+      2) 量化后调 putalpha() 把 P 变成 PA, 再存 PNG -> 同一个 OSError
+         这条让 ⚡推荐压缩 / 💾压最小 压任何透明 PNG 都失败.
+    """
+    fmt = (fmt or "PNG").upper()
+    allowed = _SAVE_MODES.get(fmt)
+    if allowed is None or im.mode in allowed:
+        return im                       # 未知格式交给 Pillow 自己报错
+
+    alpha = _has_alpha(im)
+    if alpha:
+        if "RGBA" in allowed:
+            return im.convert("RGBA")   # PA / RGBa / La 都能无损保住透明
+        if fmt == "JPEG":
+            return _flatten_on_white(im)
+        if "LA" in allowed:
+            return im.convert("LA")
+    # 没 alpha, 或者目标格式不收 alpha 但又不是 JPEG: 一律降到 RGB
+    if "RGB" in allowed:
+        return im.convert("RGB")
+    if "L" in allowed:
+        return im.convert("L")
+    return im
+
+
+def _encode_bytes(im: Image.Image, fmt: str, **kw) -> bytes:
+    """把 im 编码成目标格式的字节流, 编码不出来就降级重试一次.
+
+    三层保险:
+      1) _fit_for_format 按实测表先把 mode 掰到目标格式能写的形态
+      2) 真的还抛 OSError -> 强制转 RGB / RGBA 再试
+      3) 还不行才让异常冒出去 (留给上层记失败)
+
+    所有 save 调用都必须走这里, 别再直接 im.save(buf, fmt)。
+    """
+    fmt = (fmt or "PNG").upper()
+    im = _fit_for_format(im, fmt)
+    buf = io.BytesIO()
+    try:
+        im.save(buf, fmt, **kw)
+        return buf.getvalue()
+    except OSError:
+        pass
+    alpha = _has_alpha(im)
+    fallback = im.convert("RGBA" if alpha and fmt in ("PNG", "WEBP") else "RGB")
+    buf = io.BytesIO()
+    fallback.save(buf, fmt, **kw)
+    return buf.getvalue()
+
+
+def _apply_mode(im: Image.Image, mode: str, fmt: str, quality: int) -> Image.Image:
+    """根据 mode 调整图像 (量化等) + 保证 mode 能存进目标格式.
+
+    v11 修掉一个全预设通杀的老 bug:
+      透明 PNG 原来走的是"拆 alpha + RGB 量化 + putalpha 合并",
+      而 putalpha() 作用在 P 图上会把 mode 变成 PA,
+      PA 根本存不进 PNG -> ⚡推荐压缩 / 💾压最小 压任何透明 PNG 都失败。
+      现在带 alpha 的图一律不做调色板量化 (量化会改颜色, 对商品图是灾难),
+      只靠 zlib optimize 压 —— 实测未 optimize 的 RGBA PNG 能省 68.7%,
+      本来就 optimize 过的会由 compress_one 的智能回退判定"跳过"。
+    """
+    fmt = (fmt or "PNG").upper()
+
+    if fmt in ("JPEG", "BMP") and _has_alpha(im):
+        im = _flatten_on_white(im)
     elif fmt in ("JPEG", "WEBP") and im.mode not in ("RGB", "RGBA"):
-        im = im.convert("RGBA" if has_alpha else "RGB")
+        im = im.convert("RGBA" if _has_alpha(im) else "RGB")
 
     if fmt == "PNG" and mode in ("balanced", "aggressive"):
         colors = 256 if mode == "balanced" else 128
-        if im.mode == "RGBA":
-            # 透明图量化: 拆 alpha + RGB 量化 + 合并
-            alpha = im.split()[-1]
-            rgb = im.convert("RGB").quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
-            rgb.putalpha(alpha)
-            im = rgb
-        elif im.mode != "P":
-            im = im.convert("RGB").quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
-    return im
+        if _has_alpha(im):
+            pass                    # 带透明 -> 不量化, 保持 RGBA (见上面说明)
+        elif im.mode not in ("P", "L", "1"):
+            im = im.convert("RGB").quantize(colors=colors,
+                                            method=Image.Quantize.MEDIANCUT)
+    return _fit_for_format(im, fmt)
 
 
 def _save_kwargs(mode: str, fmt: str, quality: int, keep_exif: bool, src: Image.Image) -> dict:
@@ -200,9 +319,7 @@ def _encode_to_target(im: Image.Image, fmt: str, target_bytes: int,
     kw_exif = {"exif": src.info["exif"]} if (keep_exif and "exif" in src.info) else {}
 
     def enc(q: int) -> bytes:
-        buf = io.BytesIO()
-        im.save(buf, fmt, quality=q, optimize=True, **kw_exif)
-        return buf.getvalue()
+        return _encode_bytes(im, fmt, quality=q, optimize=True, **kw_exif)
 
     # 先用最高允许质量试一次, 达标就直接用 (画质最好)
     top = enc(hi_q)
@@ -257,23 +374,96 @@ def _fit_side(im: Image.Image, max_side: int) -> Image.Image:
     return im.resize((nw, nh), Image.LANCZOS)
 
 
+def _commit_output(out_path: Path, data: bytes, out_mode: str) -> bool:
+    """写最终输出。覆盖模式下先备份原图 —— 覆盖原图唯一能接受的前提。"""
+    if out_mode == "overwrite" and out_path.is_file():
+        bak = _backup_original(out_path)
+        if bak:
+            _v9_log(f"  [备份] {out_path.name} -> {bak}")
+    return _write_bytes(out_path, data)
+
+
+_OUT_OWNER: dict[str, str] = {}   # 本进程内: 目标路径(小写) -> 写出它的源文件
+
+
+def _pick_free(dst: Path, src: Path) -> Path | None:
+    """判断某个目标路径这次能不能用. 返回 None = 这个位置已经被别的图占了."""
+    if _same_path(dst, src):
+        return None                                   # 绝不能写到原图头上
+    key = str(dst).lower()
+    if _OUT_OWNER.get(key) == str(src):
+        return dst                                    # 本轮同一张图 → 幂等重写
+    if dst.exists():
+        return None                                    # 别的图已经占了
+    return dst
+
+
+def _fixed_out_path(src: Path, out_dir: Path, ext: str) -> Path:
+    """固定目录: 不同来源的同名图不互相覆盖, 但同一张图重复压可以幂等重写.
+
+    踩过的坑: 之前直接 out_root/<原名>.ext, 两个文件夹里的"主图.jpg"会被压缩到
+    同一个地方, 后压的那张悄悄顶掉前一张 —— 用户以为两张都导出了, 实际只剩一张.
+    """
+    for cand in ([out_dir / f"{src.stem}.{ext}"]
+                 + [out_dir / f"{src.stem}_{i}.{ext}" for i in range(1, 10000)]):
+        free = _pick_free(cand, src)
+        if free is not None:
+            _OUT_OWNER[str(free).lower()] = str(src)
+            return free
+    raise RuntimeError(f"固定目录里找不到可用文件名: {src.name}")
+
+
+def _suffixed_out_path(src: Path, out_dir: Path, ext: str) -> Path:
+    """原文件夹导出, 名字后加 _compressed 区分. 撞名再自动加序号.
+
+    这里不用 _safe_out_path 的"自撞才加后缀"逻辑: 用户明确要求原文件夹导出,
+    所以后缀是默认行为而不是兜底行为.
+    """
+    for i in range(1, 1000):
+        stem = f"{src.stem}_compressed" if i == 1 else f"{src.stem}_compressed{i}"
+        cand = out_dir / f"{stem}.{ext}"
+        if not _same_path(cand, src):
+            return cand
+    return out_dir / f"{src.stem}_compressed_x.{ext}"
+
+
+def _resolve_out_path(src: Path, out_root: Path, ext: str,
+                      out_mode: str) -> tuple[Path, Path]:
+    """按输出模式算出最终落到哪. 返回 (输出文件路径, 输出目录).
+
+      suffix   (默认) 原文件夹/<原名>_compressed.ext  —— 原图永不覆盖
+      fixed    指定文件夹/<原名>.ext                  —— 全部堆一个文件夹
+      overwrite src 本身                              —— 先备份再覆盖
+
+    注意 suffix/fixed 都不该把 out_root 再拼一层源文件夹名:
+    那是 v9 老行为, 用户要的是"原文件夹导出"和"固定位置导出".
+    """
+    if out_mode == "overwrite":
+        return src, src.parent
+    if out_mode == "fixed":
+        return _fixed_out_path(src, out_root, ext), out_root
+    out_dir = src.parent if src.parent != Path(".") else Path(".")
+    return _suffixed_out_path(src, out_dir, ext), out_dir
+
+
 def compress_one(src: Path, out_root: Path, mode: str, quality: int,
                  fmt: str, ext: str, max_side: int, keep_exif: bool,
                  skip_if_larger: bool = True,
-                 target_kb: int = 0) -> tuple[Path, int, int, str]:
+                 target_kb: int = 0,
+                 out_mode: str = "suffix") -> tuple[Path, int, int, str]:
     """压缩单张. mode: lossless / balanced / aggressive / target.
 
-    安全策略 (v7):
+    安全策略 (v7, v11 扩展):
       - 输出路径永远不可能等于原图, 撞车自动加 _compressed 后缀
-      - 原图只读, 任何分支都不覆盖原图
+        (唯一例外是用户显式选的 out_mode="overwrite", 那种会先备份)
+      - out_mode="suffix"/"fixed" 时原图只读, 任何分支都不覆盖原图
       - 上一轮生成的压缩结果会被直接覆盖重写 -> 重复点"开始压缩"不再一堆"跳过"
 
     返回 (输出路径, 原图字节, 输出字节, 状态消息)
       状态 "ok" 或 "ok|..." = 成功; 含"跳过" = 没压; 其余 = 失败
     """
-    out_dir = out_root / (src.parent.name if src.parent != Path(".") else ".")
+    out_path, out_dir = _resolve_out_path(src, out_root, ext, out_mode)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = _safe_out_path(src, out_dir, ext)
     src_bytes = src.stat().st_size
 
     if src_bytes < MIN_SIZE_SKIP:
@@ -294,7 +484,15 @@ def compress_one(src: Path, out_root: Path, mode: str, quality: int,
                     im2, fmt, target_bytes, keep_exif, im, hi_q=max(quality, 60))
         except Exception as e:
             return (out_path, src_bytes, 0, f"失败:{e}")
-        if not _write_bytes(out_path, data):
+        # 目标模式下质量对 PNG/BMP/TIFF 几乎无效, 二分搜索只能一路压到 q18 仍然超标.
+        # 结果就是"为了压到 200KB, 反而给用户一个比原图更大的文件" —— 违背"永不越压越大"
+        # 这条底线, 所以这里跟其它分支一样走智能回退: 没变小就原样保留.
+        # 达不到目标但确实变小的图仍然照常写出 (上面 _t_v7 的"极难目标"用例就靠这条).
+        if skip_if_larger and got >= src_bytes:
+            return (src, src_bytes, got,
+                    f"跳过 (压到最低q{TARGET_MIN_Q}后仍 {human_size(got)} "
+                    f"> 原图 {human_size(src_bytes)}, 保留原图)")
+        if not _commit_output(out_path, data, out_mode):
             return (out_path, src_bytes, 0, "写入失败(可能被占用)")
         if hit:
             return (out_path, src_bytes, got, f"ok|质量q={used_q}")
@@ -323,6 +521,10 @@ def compress_one(src: Path, out_root: Path, mode: str, quality: int,
                 return (src, src_bytes, src_bytes,
                         f"跳过 (可剥的元数据只有 {saved}B, 不值得再存一个 "
                         f"{human_size(src_bytes)} 的文件, 原样保留)")
+            if out_mode == "overwrite" and out_path.is_file():
+                bak = _backup_original(out_path)
+                if bak:
+                    _v9_log(f"  [备份] {out_path.name} -> {bak}")
             try:
                 tmp_path.replace(out_path)   # 覆盖上一轮的压缩结果
             except OSError:
@@ -335,16 +537,13 @@ def compress_one(src: Path, out_root: Path, mode: str, quality: int,
         with Image.open(src) as im:
             im2 = _fit_side(_apply_mode(im, mode, fmt, quality), max_side)
             kw = _save_kwargs(mode, fmt, quality, keep_exif, im)
-
-            buf = io.BytesIO()
-            im2.save(buf, fmt, **kw)
-            data = buf.getvalue()
+            data = _encode_bytes(im2, fmt, **kw)
 
             if skip_if_larger and len(data) >= src_bytes * KEEP_IF_LARGER_RATIO:
                 return (src, src_bytes, src_bytes,
                         f"跳过 (压完 {human_size(len(data))} ≥ 原图 {human_size(src_bytes)}, 保留原图)")
 
-            if not _write_bytes(out_path, data):
+            if not _commit_output(out_path, data, out_mode):
                 return (out_path, src_bytes, 0, "写入失败(可能被占用)")
             return (out_path, src_bytes, len(data), "ok")
 
@@ -370,7 +569,8 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
                 im2 = _fit_side(_apply_mode(im, "balanced", fmt, quality), max_side)
                 data, _q, got, _hit = _encode_to_target(
                     im2, fmt, target_bytes, keep_exif, im, hi_q=max(quality, 60))
-            return (got, "")
+            # 跟 compress_one 的智能回退保持一致: 预览别报一个"压完反而更大"的数字
+            return (src_bytes if got >= src_bytes else got, "")
         except Exception as e:
             return (0, f"预览失败:{e}")
 
@@ -391,9 +591,7 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
         with Image.open(src) as im:
             im2 = _fit_side(_apply_mode(im, mode, fmt, quality), max_side)
             kw = _save_kwargs(mode, fmt, quality, keep_exif, im)
-            buf = io.BytesIO()
-            im2.save(buf, fmt, **kw)
-            return (buf.tell(), "")
+            return (len(_encode_bytes(im2, fmt, **kw)), "")
     except Exception as e:
         return (0, f"预览失败:{e}")
 
@@ -401,7 +599,7 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("图瘦身 v9 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
+        root.title("图瘦身 v11 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
         root.geometry("1000x880")
         # 窗口图标 (含任务栏图标). 兼容 PyInstaller 单文件 (sys._MEIPASS).
         try:
@@ -536,6 +734,18 @@ class App:
             relief="flat", height=2, command=self.start,
         )
         self.start_btn.pack(fill="x", pady=6)
+
+        # v11: 设置入口 + 备份入口
+        srow = ttk.Frame(left)
+        srow.pack(fill="x", pady=(0, 2))
+        ttk.Button(srow, text="⚙ 设置",
+                   command=self.open_settings).pack(side="left")
+        ttk.Button(srow, text="↩︎ 备份/还原",
+                   command=lambda: self.restore_window(self.root)).pack(side="left", padx=6)
+        self._settings_hint = ttk.Label(srow, text="", font=("Microsoft YaHei", 8),
+                                        foreground="#888")
+        self._settings_hint.pack(side="left", padx=4)
+        self._refresh_settings_hint()
 
         prog = ttk.Frame(left)
         prog.pack(fill="x")
@@ -721,6 +931,272 @@ class App:
         if d:
             self.out_dir = Path(d).resolve()
             self.out_var.set(str(self.out_dir))
+
+    # ===== v11: 设置 + 备份 =====
+    def _refresh_settings_hint(self):
+        """在主界面提示当前默认设置, 免得用户忘了自己设成什么了."""
+        try:
+            cfg = _load_settings()
+            txt = OUTPUT_MODE_LABELS.get(cfg["output_mode"], "")
+            if cfg["output_mode"] == "fixed" and cfg.get("output_dir"):
+                txt += f" → {Path(cfg['output_dir']).name}"
+            self._settings_hint.config(text=f"右键菜单默认: {cfg['preset']} · {txt}")
+        except Exception:
+            pass
+
+    def open_settings(self):
+        """设置对话框: 记住默认值, 让右键菜单按你的习惯干活."""
+        top = tk.Toplevel(self.root)
+        top.title("图瘦身 — 设置")
+        top.transient(self.root)
+        top.resizable(False, False)
+        try:
+            top.iconbitmap(str(getattr(sys, "_MEIPASS", "") and
+                               Path(getattr(sys, "_MEIPASS", "")) / "app.ico"
+                               or ""))
+        except Exception:
+            pass
+
+        cfg = _load_settings()
+        f = ("Microsoft YaHei UI", 9)
+
+        pad = ttk.Frame(top, padding=16)
+        pad.pack(fill="both", expand=True)
+
+        # --- 1. 右键菜单默认预设 ---
+        ttk.Label(pad, text="右键菜单默认压缩到", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(pad, text="在资源管理器里右键选图 →「用图瘦身处理」时用的档位",
+                  font=f, foreground="#666").pack(anchor="w", pady=(0, 4))
+        preset_names = list(PRESETS.keys())
+        pv = tk.StringVar(value=cfg["preset"] if cfg["preset"] in preset_names
+                          else V9_FALLBACK_PRESET)
+        ttk.Combobox(pad, textvariable=pv, values=preset_names,
+                     state="readonly", font=f).pack(fill="x")
+        ph = ttk.Label(pad, text="", font=f, foreground="#06c", wraplength=430)
+        ph.pack(anchor="w", pady=(3, 0))
+
+        def show_desc(*_):
+            p = PRESETS.get(pv.get())
+            if p:
+                ph.config(text=p["desc"])
+        pv.trace_add("write", show_desc)
+        show_desc()
+
+        # --- 2. 默认输出格式 ---
+        ttk.Separator(pad).pack(fill="x", pady=12)
+        ttk.Label(pad, text="默认输出格式", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        fv = tk.StringVar(value=FORMAT_LABELS.get(cfg["format"], FORMAT_LABELS["keep"]))
+        ttk.Combobox(pad, textvariable=fv, values=list(FORMAT_LABELS.values()),
+                     state="readonly", font=f).pack(fill="x", pady=(4, 0))
+
+        # --- 3. 默认输出位置 ---
+        ttk.Separator(pad).pack(fill="x", pady=12)
+        ttk.Label(pad, text="默认输出位置", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ov = tk.StringVar(value=cfg["output_mode"])
+        notes = {
+            "suffix": "原文件夹导出，文件名加 _compressed（最安全，不动原图）",
+            "overwrite": "直接覆盖原图片（覆盖前自动备份，可还原）",
+            "fixed": "统一导出到你指定的固定目录",
+        }
+        radios = []
+        for key in OUTPUT_MODES:
+            r = ttk.Radiobutton(pad, text=OUTPUT_MODE_LABELS[key], value=key,
+                                variable=ov, font=f)
+            r.pack(anchor="w", fill="x")
+            radios.append(r)
+
+        dirf = ttk.Frame(pad)
+        dirf.pack(fill="x", pady=(4, 0))
+        dv = tk.StringVar(value=str(cfg.get("output_dir") or ""))
+        ttk.Label(dirf, text="固定目录:").pack(side="left")
+        ttk.Entry(dirf, textvariable=dv, font=("Consolas", 9)).pack(
+            side="left", fill="x", expand=True, padx=4)
+
+        def browse_fixed():
+            d = filedialog.askdirectory(title="选固定输出目录",
+                                        initialdir=dv.get() or str(Path.home()))
+            if d:
+                dv.set(d)
+
+        ttk.Button(dirf, text="浏览", width=6, command=browse_fixed).pack(side="left")
+        warn = ttk.Label(pad, text="", font=f, foreground="#c0392b", wraplength=430)
+        warn.pack(anchor="w", pady=(4, 0))
+
+        ackv = tk.BooleanVar(value=bool(cfg.get("overwrite_ack")))
+        ackb = ttk.Checkbutton(
+            pad, text="我知道「覆盖原图」有风险（覆盖前会自动备份，出问题能还原）",
+            variable=ackv, font=f)
+        ackb.pack(anchor="w", pady=(6, 0))
+
+        def on_mode(*_):
+            m = ov.get()
+            for r in radios:
+                if r.cget("value") == m:
+                    r.state(["!disabled"])
+                else:
+                    r.state(["disabled"]) if m == "fixed" else None
+            dirf.state(["disabled"] if m != "fixed" else ["!disabled"])
+            warn.config(text=notes.get(m, ""))
+            if m == "overwrite":
+                ackb.state(["!disabled"])
+            else:
+                ackb.state(["disabled"])
+
+        ov.trace_add("write", on_mode)
+        on_mode()
+
+        # --- 4. 备份 ---
+        ttk.Separator(pad).pack(fill="x", pady=12)
+        sessions = _backup_sessions()
+        bcount = sum(len(it) for _, it in sessions)
+        ttk.Label(pad, text="备份", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(pad, text=f"共 {len(sessions)} 批 · {bcount} 个文件 · 位置 {_backup_root()}",
+                  font=f, foreground="#666", wraplength=430).pack(anchor="w", pady=(0, 4))
+        bframe = ttk.Frame(pad)
+        bframe.pack(fill="x")
+
+        def open_bak():
+            d = _backup_root()
+            d.mkdir(parents=True, exist_ok=True)
+            try:
+                os.startfile(str(d))
+            except Exception as e:
+                messagebox.showerror("图瘦身", f"打不开: {e}", parent=top)
+
+        ttk.Button(bframe, text="📂 打开备份目录", command=open_bak).pack(side="left")
+        ttk.Button(bframe, text="↩︎ 从备份还原…",
+                   command=lambda: self.restore_window(top)).pack(side="left", padx=8)
+
+        # --- 保存 ---
+        ttk.Separator(pad).pack(fill="x", pady=12)
+        btns = ttk.Frame(pad)
+        btns.pack(fill="x")
+
+        def save():
+            mode = ov.get()
+            fdir = dv.get().strip()
+            if mode == "fixed" and not fdir:
+                messagebox.showwarning("图瘦身", "选了「固定目录」但没填目录。", parent=top)
+                return
+            if mode == "fixed":
+                try:
+                    Path(fdir).expanduser().mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    messagebox.showerror("图瘦身", f"这个目录建不了: {e}", parent=top)
+                    return
+            new = {
+                "preset": pv.get(),
+                "format": {v: k for k, v in FORMAT_LABELS.items()}.get(fv.get(), "keep"),
+                "output_mode": mode,
+                "output_dir": fdir,
+                "overwrite_ack": bool(ackv.get()),
+            }
+            if _save_settings(new):
+                self._log(f">>> 设置已保存: 预设={new['preset']} 格式={new['format']} "
+                          f"输出={OUTPUT_MODE_LABELS[new['output_mode']]}\n")
+                messagebox.showinfo("图瘦身", "设置已保存，右键菜单下次就按这个来。", parent=top)
+                top.destroy()
+            else:
+                messagebox.showerror("图瘦身", "设置保存失败，权限不足？", parent=top)
+
+        ttk.Button(btns, text="保存", command=save).pack(side="right")
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side="right", padx=6)
+
+        top.bind("<Escape>", lambda e: top.destroy())
+        top.update_idletasks()
+        w = top.winfo_reqwidth()
+        h = top.winfo_reqheight()
+        top.geometry(f"{max(w, 480)}x{h}")
+
+    def restore_window(self, parent):
+        """挑一个备份批次还原回去."""
+        sessions = _backup_sessions()
+        if not sessions:
+            messagebox.showinfo(
+                "图瘦身",
+                "还没有任何备份。\n\n"
+                "只有当你把默认输出位置设成「覆盖原图」并真的覆盖过时，\n"
+                "这里才会有可还原的东西。", parent=parent)
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title("图瘦身 — 从备份还原")
+        top.transient(parent)
+        top.geometry("620x380")
+        f = ("Microsoft YaHei UI", 9)
+
+        ttk.Label(top, text="选一个批次还原回原位置",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+        ttk.Label(top, text="还原前会再存一份当前版本，所以还原本身也可以反悔。",
+                  font=f, foreground="#666").pack(anchor="w", padx=12)
+
+        lb = tk.Listbox(top, font=("Consolas", 9), activestyle="dotbox")
+        lb.pack(fill="both", expand=True, padx=12, pady=8)
+        for d, items in sessions:
+            total = sum(int(i.get("backup_size") or 0) for i in items)
+            lb.insert("end", f"{d.name}    {len(items)} 个文件    {human_size(total)}")
+        lb.selection_set(0)
+
+        detail = ttk.Label(top, text="", font=f, foreground="#666",
+                           wraplength=580, justify="left")
+        detail.pack(anchor="w", padx=12)
+
+        def show_detail(*_):
+            sel = lb.curselection()
+            if not sel:
+                return
+            d, items = sessions[sel[0]]
+            if items and items[0].get("legacy"):
+                detail.config(text=f"（这一批没有清单文件，还原需要你手动指定原位置）")
+            else:
+                detail.config(text="\n".join(
+                    f"  {i.get('backup')}  ←  {i.get('original')}" for i in items[:6])
+                    + ("\n  …" if len(items) > 6 else ""))
+        lb.bind("<<ListboxSelect>>", show_detail)
+        lb.bind("<<Listbox>>", lambda e: detail.config(text=""))
+        show_detail()
+
+        def do_restore():
+            sel = lb.curselection()
+            if not sel:
+                return
+            d, items = sessions[sel[0]]
+            if any(i.get("legacy") for i in items):
+                messagebox.showwarning(
+                    "图瘦身", "这一批没有还原清单，只能自己从备份目录里拷文件。\n\n"
+                              "已为你打开备份目录。", parent=top)
+                try:
+                    os.startfile(str(d))
+                except Exception:
+                    pass
+                return
+            if not messagebox.askyesno(
+                    "确认还原",
+                    f"把 {len(items)} 个文件还原回原位置？\n\n"
+                    "原图会被覆盖回压缩前的样子。\n"
+                    "还原前会自动再存一份当前版本。", parent=top):
+                return
+            ok, bad = _restore_backup(d, items)
+            self._log(f">>> 还原: 成功 {ok} · 失败 {bad}  (批次 {d.name})\n")
+            messagebox.showinfo("图瘦身",
+                                f"还原完成。\n成功 {ok} 个 · 失败 {bad} 个", parent=top)
+            top.destroy()
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(btns, text="↩︎ 还原这一批", command=do_restore).pack(side="left")
+        ttk.Button(btns, text="打开这个备份目录", command=lambda: os.startfile(
+            str(sessions[lb.curselection()[0]][0])) if lb.curselection() else None
+        ).pack(side="left", padx=8)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
+
+    def _open_backup_dir(self):
+        d = _backup_root()
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(d))
+        except Exception as e:
+            messagebox.showerror("图瘦身", f"打不开备份目录: {e}", parent=self.root)
 
     def _refresh_list(self):
         self.listbox.delete(0, "end")
@@ -1004,7 +1480,7 @@ class App:
 #    2) 输出目录 = out_root/<源文件夹名>/, 跟 GUI 里 compress_one 的策略一致,
 #       不同源文件夹的同名图不会互相覆盖; 原图永远不动。
 V9_DEFAULT_OUT = "picshrink_out"
-V9_LOG_NAME = "picshrink_v9.log"
+V9_LOG_NAME = "picshrink_v11.log"
 V9_FALLBACK_PRESET = "⚡ 推荐压缩"
 
 
@@ -1027,42 +1503,228 @@ def _v9_print(msg: str = "") -> None:
 
 
 def _v9_config_path() -> Path:
-    r"""快捷入口的偏好文件: %LOCALAPPDATA%\图瘦身\quick.json"""
+    r"""设置文件: %LOCALAPPDATA%\图瘦身\settings.json
+
+    v11 从 quick.json 迁过来的, 老配置会自动读进来, 不用用户重设。
+    """
+    return _pic_root() / "settings.json"
+
+
+def _pic_root() -> Path:
+    """安装目录 (%LOCALAPPDATA%\\图瘦身) —— 偏好/备份都放这儿."""
     base = os.environ.get("LOCALAPPDATA") or ""
-    root = Path(base) if base else Path.home()
-    return root / "图瘦身" / "quick.json"
+    return (Path(base) if base else Path.home()) / "图瘦身"
+
+
+def _backup_root() -> Path:
+    """覆盖原图前的备份目录."""
+    return _pic_root() / "备份"
+
+
+# ===== 输出位置 3 种模式 =====
+OUTPUT_MODES = ("suffix", "overwrite", "fixed")
+OUTPUT_MODE_LABELS = {
+    "suffix":    "原文件夹导出, 名字后加 _compressed (最安全)",
+    "overwrite": "直接覆盖原图 (覆盖前自动备份, 可还原)",
+    "fixed":     "统一导出到指定文件夹",
+}
+
+# ===== 默认输出格式 (None = 跟随预设/保持原格式) =====
+FORMAT_CHOICES = ("keep", "jpg", "png", "webp")
+FORMAT_LABELS = {
+    "keep": "保持原格式 (推荐)",
+    "jpg": "JPG — 体积最小, 丢透明",
+    "png": "PNG — 无损, 支持透明",
+    "webp": "WebP — 比 JPG 还小, 支持透明",
+}
+
+
+def _default_settings() -> dict:
+    return {
+        "version": 1,
+        "preset": V9_FALLBACK_PRESET,
+        "format": "keep",
+        "output_mode": "suffix",
+        "output_dir": "",
+        "overwrite_ack": False,   # 用户是否已确认过"覆盖原图有风险"
+    }
+
+
+def _load_settings() -> dict:
+    """读设置。坏了就退回默认, 绝不因为配置问题让程序起不来。"""
+    s = _default_settings()
+    for name in ("settings.json", "quick.json"):     # quick.json = v9 老文件
+        p = _pic_root() / name
+        if not p.is_file():
+            continue
+        try:
+            import json
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                continue
+            for k, v in raw.items():
+                if k in s:
+                    s[k] = v
+            break
+        except Exception:
+            continue
+    # 逐字段校验, 配置文件是人手改的, 不能直接信
+    if s.get("preset") not in PRESETS:
+        s["preset"] = V9_FALLBACK_PRESET
+    if s.get("format") not in FORMAT_CHOICES:
+        s["format"] = "keep"
+    if s.get("output_mode") not in OUTPUT_MODES:
+        s["output_mode"] = "suffix"
+    s["output_dir"] = str(s.get("output_dir") or "")
+    s["overwrite_ack"] = bool(s.get("overwrite_ack"))
+    return s
+
+
+def _save_settings(s: dict) -> bool:
+    try:
+        import json
+        p = _v9_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        merged = _default_settings()
+        merged.update({k: v for k, v in s.items() if k in merged})
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:
+        return False
 
 
 def _v9_load_preset() -> str:
-    """快捷入口默认预设 = GUI 里你手动点过的那个; 没点过就用 ⚡ 推荐压缩."""
-    try:
-        p = _v9_config_path()
-        if p.is_file():
-            import json
-            name = json.loads(p.read_text(encoding="utf-8")).get("preset")
-            if name in PRESETS:
-                return name
-    except Exception:
-        pass
-    return V9_FALLBACK_PRESET
+    """快捷入口默认预设 = 你在设置里定的那个 (或 GUI 里手动点过的)."""
+    return _load_settings()["preset"]
 
 
 def _v9_save_preset(name: str) -> None:
     """GUI 里手动换预设时记一笔, 右键快捷入口下次就用它."""
     if name not in PRESETS:
         return
+    s = _load_settings()
+    s["preset"] = name
+    _save_settings(s)
+
+
+def _backup_manifest(stamp_dir: Path) -> Path:
+    return stamp_dir / "_restore.json"
+
+
+def _backup_record(stamp_dir: Path, backup_file: Path, original: Path) -> None:
+    """记下「这个备份是从哪个原文件来的」—— 还原时才知道往哪儿放回去."""
+    import json
+    mf = _backup_manifest(stamp_dir)
+    data = {"items": []}
+    if mf.is_file():
+        try:
+            old = json.loads(mf.read_text(encoding="utf-8"))
+            if isinstance(old, dict) and isinstance(old.get("items"), list):
+                data = old
+        except Exception:
+            pass
     try:
-        import json
-        p = _v9_config_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"preset": name}, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+        osize = original.stat().st_size
+    except OSError:
+        osize = 0
+    try:
+        bsize = backup_file.stat().st_size
+    except OSError:
+        bsize = 0
+    data["items"].append({
+        "backup": backup_file.name,
+        "original": str(original),
+        "original_size": osize,
+        "backup_size": bsize,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    try:
+        mf.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                      encoding="utf-8")
+    except Exception as e:
+        _v9_log(f"[backup] 写清单失败: {e}")
 
 
-_V9_VALUE_OPTS = {"--preset": "preset", "--out": "out", "--format": "format"}
+def _backup_sessions() -> list[tuple[Path, list[dict]]]:
+    """列出所有备份批次, 新的在前. 返回 [(目录, 清单项列表)]."""
+    out: list[tuple[Path, list[dict]]] = []
+    root = _backup_root()
+    if not root.is_dir():
+        return out
+    for d in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
+        items: list[dict] = []
+        mf = _backup_manifest(d)
+        if mf.is_file():
+            try:
+                raw = json.loads(mf.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and isinstance(raw.get("items"), list):
+                    items = [i for i in raw["items"] if isinstance(i, dict)]
+            except Exception:
+                items = []
+        if not items:      # 清单丢了就退回按文件名认
+            items = [{"backup": f.name, "original": "", "legacy": True}
+                     for f in sorted(d.iterdir())
+                     if f.is_file() and f.name != "_restore.json"]
+        out.append((d, items))
+    return out
 
-V9_USAGE = f"""图瘦身 (PicShrink) v9 — 快捷压缩入口
+
+def _restore_backup(stamp_dir: Path, items: list[dict]) -> tuple[int, int]:
+    """把一个备份批次还原回原位. 返回 (成功数, 失败数)."""
+    ok = bad = 0
+    for it in items:
+        src = stamp_dir / str(it.get("backup", ""))
+        dst = Path(str(it.get("original") or "")).expanduser()
+        if not src.is_file() or not it.get("original"):
+            bad += 1
+            continue
+        try:
+            if dst.exists() and _same_path(dst, src):
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            # 还原本身也要可逆: 还原前先给「当前版本」留一份
+            pre_dir = _backup_root() / (_now_stamp() + "-prerestore")
+            pre_dir.mkdir(parents=True, exist_ok=True)
+            pre = pre_dir / dst.name
+            shutil.copy2(dst if dst.exists() else src, pre)
+            _backup_record(pre_dir, pre, dst)
+            shutil.copy2(src, dst)
+            ok += 1
+        except Exception as e:
+            _v9_log(f"[restore] 还原 {dst} 失败: {e}")
+            bad += 1
+    return ok, bad
+
+
+def _now_stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _backup_original(src: Path) -> Path | None:
+    """覆盖原图前先存一份, 出问题能还原. 返回备份路径."""
+    try:
+        d = _backup_root() / _now_stamp()
+        d.mkdir(parents=True, exist_ok=True)
+        dst = d / src.name
+        n = 1
+        while dst.exists():
+            dst = d / f"{src.stem}_{n}{src.suffix}"
+            n += 1
+        shutil.copy2(src, dst)
+        _backup_record(d, dst, src)
+        return dst
+    except Exception as e:
+        _v9_log(f"[backup] 备份 {src} 失败: {e}")
+        return None
+
+
+_V9_VALUE_OPTS = {"--preset": "preset", "--out": "out", "--format": "format",
+                  "--output-mode": "output_mode"}
+
+V9_USAGE = f"""图瘦身 (PicShrink) v11 — 快捷压缩入口
 
   图瘦身.exe                            打开图形界面
   图瘦身.exe "D:\\图\\a.jpg"             直接压缩这一张
@@ -1095,7 +1757,7 @@ def _v9_parse(argv: list[str]):
 
     返回 (opts, paths)。未知开关一律忽略, 免得 Explorer 传个怪东西就崩。
     """
-    opts = {"preset": None, "out": None, "format": None,
+    opts = {"preset": None, "out": None, "format": None, "output_mode": None,
             "gui": False, "notify": True, "help": False, "list_presets": False,
             "install": False, "uninstall": False, "quiet": False}
     paths: list[str] = []
@@ -1225,7 +1887,7 @@ def _v9_geometry(root, w: int, h: int) -> str:
 
 def _v9_compress_all(files: list[Path], out_root: Path, mode: str, quality: int,
                      fmt_arg: str, max_side: int, keep_exif: bool, target_kb: int,
-                     on_done=None) -> list[dict]:
+                     on_done=None, out_mode: str = "suffix") -> list[dict]:
     """逐张压, 返回结果字典列表. 完全复用 GUI 的 compress_one."""
     results: list[dict] = []
     for i, src in enumerate(files):
@@ -1242,7 +1904,7 @@ def _v9_compress_all(files: list[Path], out_root: Path, mode: str, quality: int,
         try:
             out_path, sb, ob, msg = compress_one(
                 src, out_root, mode, quality, save_fmt, ext,
-                max_side, keep_exif, True, target_kb)
+                max_side, keep_exif, True, target_kb, out_mode)
             rec.update(out=out_path, src_bytes=sb, out_bytes=ob, msg=msg)
         except Exception as e:
             rec["msg"] = f"失败: {e}"
@@ -1272,7 +1934,7 @@ def _v9_report_text(results: list[dict], out_root: Path, preset_name: str) -> st
     saved = sum(r["src_bytes"] - r["out_bytes"]
                 for r in results if r["ok"] and r["out_bytes"] > 0)
     lines = [
-        "图瘦身 v9 — 完成",
+        "图瘦身 v11 — 完成",
         f"预设: {preset_name}",
         f"成功 {ok} · 跳过 {skip} · 失败 {fail}",
         f"省下: {human_size(max(0, saved))}" if saved > 0 else "没省下体积",
@@ -1294,7 +1956,7 @@ def _v9_fatal(msg: str, notify: bool = True) -> None:
         root = tk.Tk()
         root.withdraw()
         _v9_icon(root)
-        messagebox.showerror("图瘦身 v9", msg, parent=root)
+        messagebox.showerror("图瘦身 v11", msg, parent=root)
         root.destroy()
     except Exception:
         pass
@@ -1311,7 +1973,7 @@ def _v9_result_ui(root, results: list[dict], out_root: Path,
 
     for w in root.winfo_children():
         w.destroy()
-    root.title("图瘦身 v9 — 完成")
+    root.title("图瘦身 v11 — 完成")
     root.geometry(_v9_geometry(root, 620, 460))
     root.minsize(620, 460)
 
@@ -1384,6 +2046,34 @@ def _v9_result_ui(root, results: list[dict], out_root: Path,
         root.after(1000, countdown)
 
 
+def _v9_overwrite_allowed(out_mode: str, cfg: dict, notify: bool,
+                          n_files: int) -> bool:
+    """覆盖原图前的一道闸. False = 不许跑, 一个字节都不能动.
+
+    覆盖是唯一不可逆的输出模式, 所以:
+      - 界面里: 每次都弹确认, 就算之前勾过"我知道有风险"
+      - 脚本里: 没勾过确认就直接拒绝, 不猜你的意图
+    """
+    if out_mode != "overwrite" or cfg.get("overwrite_ack"):
+        return True
+    if notify:
+        if _v9_box(
+                "图瘦身 — 确认覆盖原图",
+                "你把默认输出位置设成了「覆盖原图」。\n\n"
+                f"这会把压好的图直接写回 {n_files} 个原文件, 原图路径不变。\n"
+                "放心: 覆盖前会自动复制一份到备份文件夹, 出问题能还原。\n\n"
+                "确定要继续吗?", ask=True):
+            return True
+        _v9_fatal("已取消, 没有任何文件被改动。", notify=False)
+        return False
+    _v9_fatal(
+        "当前设置为「覆盖原图」, 但你还没确认过风险。\n\n"
+        "  · 图形界面: 打开图瘦身 → 设置 → 勾一次「我知道覆盖原图有风险」\n"
+        "  · 只想导出副本: 加 --output-mode suffix",
+        notify=False)
+    return False
+
+
 def _v9_quick(paths: list[str], opts: dict) -> int:
     """V9 快捷压缩主流程: 进度窗 → 后台压缩 → 结果窗."""
     files = _v9_expand(paths)
@@ -1410,14 +2100,48 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
     max_side = int(pr.get("max_side", 0))
     keep_exif = bool(pr.get("keep_exif", False))
     target_kb = int(pr.get("target_kb", 0))
-    fmt_arg = opts["format"] or pr.get("format", "keep")
+
+    # v11: 右键快捷入口读用户在设置里定的默认值.
+    # 优先级: 命令行显式参数 > 用户设置 > 预设自带默认值.
+    cfg = _load_settings()
+    fmt_arg = opts["format"] or cfg["format"] or pr.get("format", "keep")
+    out_mode = opts["output_mode"] or cfg["output_mode"]
+    if out_mode not in OUTPUT_MODES:
+        out_mode = "suffix"
+    fixed_dir = str(cfg.get("output_dir") or "").strip()
+
+    if out_mode == "fixed" and fixed_dir:
+        # 固定目录模式: 用户指定了位置就用它
+        try:
+            out_root = Path(fixed_dir).expanduser().resolve()
+        except Exception:
+            out_root = (Path.home() / V9_DEFAULT_OUT).resolve()
+    else:
+        try:
+            out_root = (Path(opts["out"]).expanduser() if opts["out"]
+                        else (Path.home() / V9_DEFAULT_OUT)).resolve()
+        except Exception:
+            out_root = (Path.home() / V9_DEFAULT_OUT).resolve()
 
     try:
-        out_root = Path(opts["out"]).expanduser() if opts["out"] else (Path.home() / V9_DEFAULT_OUT)
-        out_root = out_root.resolve()
         out_root.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _v9_fatal(f"输出目录建不了: {e}", notify=opts["notify"])
+        return 2
+
+    # overwrite 模式不往独立目录写, 但 out_root 仍要给报告用
+    where = {"suffix": "原文件夹 (加 _compressed 后缀)",
+             "fixed": "固定目录",
+             "overwrite": "覆盖原图 (已自动备份)"}[out_mode]
+    # 只有"从设置里读到的 fixed 但没配目录"才退回加后缀.
+    # 命令行显式 --output-mode fixed --out X 必须照办.
+    if out_mode == "fixed" and not fixed_dir and not opts["out"]:
+        out_mode, where = "suffix", "原文件夹 (未设固定目录, 退回加后缀)"
+    if out_mode == "suffix" and not opts["out"] and not fixed_dir:
+        where = f"{where} · 备用副本在 {out_root}"
+
+    # 覆盖原图 = 不可逆操作, 没确认过就不敢自动跑.
+    if not _v9_overwrite_allowed(out_mode, cfg, opts["notify"], len(files)):
         return 2
 
     total_bytes = 0
@@ -1430,14 +2154,17 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
     try:
         import time as _time
         _v9_log(f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] preset={preset_name} "
-                f"mode={mode} fmt={fmt_arg} n={len(files)} -> {out_root}")
+                f"mode={mode} fmt={fmt_arg} out_mode={out_mode} "
+                f"n={len(files)} -> {out_root}")
     except Exception:
-        _v9_log(f"preset={preset_name} mode={mode} fmt={fmt_arg} n={len(files)} -> {out_root}")
+        _v9_log(f"preset={preset_name} mode={mode} fmt={fmt_arg} "
+                f"out_mode={out_mode} n={len(files)} -> {out_root}")
 
     # 脚本 / 测试模式: 不开窗, 直接跑完并把结果打到控制台
     if not opts["notify"]:
         results = _v9_compress_all(files, out_root, mode, quality, fmt_arg,
-                                   max_side, keep_exif, target_kb)
+                                   max_side, keep_exif, target_kb,
+                                   out_mode=out_mode)
         _v9_print(_v9_report_text(results, out_root, preset_name))
         return _v9_rc(results)
 
@@ -1449,7 +2176,7 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
         return 2
     _v9_style(root)
     _v9_icon(root)
-    root.title("图瘦身 v9 — 正在压缩")
+    root.title("图瘦身 — 正在压缩")
 
     outer = ttk.Frame(root, padding=18)
     outer.pack(fill="both", expand=True)
@@ -1465,8 +2192,9 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
     bar.start(12)
     cnt = ttk.Label(outer, text=f"0 / {len(files)}", font=("Microsoft YaHei UI", 9))
     cnt.pack(anchor="w")
-    ttk.Label(outer, text=f"输出到: {out_root}",
-              font=("Microsoft YaHei UI", 8), foreground="#666").pack(anchor="w", pady=(10, 0))
+    ttk.Label(outer, text=f"输出: {where}",
+              font=("Microsoft YaHei UI", 8), foreground="#666",
+              wraplength=480).pack(anchor="w", pady=(10, 0))
     root.geometry(_v9_geometry(root, 520, 260))
     root.protocol("WM_DELETE_WINDOW", root.destroy)
 
@@ -1476,7 +2204,8 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
     def worker():
         res = _v9_compress_all(
             files, out_root, mode, quality, fmt_arg, max_side, keep_exif, target_kb,
-            on_done=lambda n: root.after(0, lambda n=n: on_tick(n)))
+            on_done=lambda n: root.after(0, lambda n=n: on_tick(n)),
+            out_mode=out_mode)
         holder["results"] = res
 
         def show():
@@ -1501,7 +2230,7 @@ def _v9_show_help(notify: bool) -> None:
         root = tk.Tk()
         _v9_icon(root)
         _v9_style(root)
-        root.title("图瘦身 v9 — 用法")
+        root.title("图瘦身 v11 — 用法")
         outer = ttk.Frame(root, padding=14)
         outer.pack(fill="both", expand=True)
         txt = tk.Text(outer, font=("Consolas", 9), wrap="none", width=76)
@@ -1528,7 +2257,7 @@ def _v9_show_presets(notify: bool) -> None:
         root = tk.Tk()
         _v9_icon(root)
         _v9_style(root)
-        root.title("图瘦身 v9 — 预设清单")
+        root.title("图瘦身 v11 — 预设清单")
         outer = ttk.Frame(root, padding=14)
         outer.pack(fill="both", expand=True)
         txt = tk.Text(outer, font=("Consolas", 10), wrap="word", width=66)
@@ -1554,7 +2283,7 @@ def _v9_show_presets(notify: bool) -> None:
 #
 #  顺带把 exe 文件名改成 ASCII 的 PicShrink.exe, 这样批处理引用它也不会出事。
 
-V9_APP_TITLE = "图瘦身 (PicShrink) v9"
+V9_APP_TITLE = "图瘦身 (PicShrink) v11"
 V9_FOLDER_NAME = "图瘦身"
 V9_MENU_NAME = "用图瘦身处理"
 V9_MENU_NAME_DIR = "用图瘦身压缩这个文件夹"
@@ -1744,7 +2473,13 @@ def v9_install(quiet: bool = False) -> int:
     _v9_install_step(1, 5, f"主程序: {dst_exe}", lines)
 
     icon = f"{dest / 'app.ico'},0" if (dest / "app.ico").is_file() else str(dst_exe)
-    cmd = f'"{dst_exe}" "%1"'
+    # 多选必须用 Player + "%*":
+    #   Microsoft 文档规定 MultiSelectModel=Single 只支持单选,
+    #   选中数量跟模型对不上时 Explorer 直接不显示这个菜单项 ——
+    #   这正是"单选有菜单、多选没了"的原因。
+    #   Player 支持任意数量, 再配合 "%*" 把所有选中项一次传进来。
+    #   别改回 Single / "%1"。
+    cmd = f'"{dst_exe}" "%*"'
     try:
         # 2) 图片右键菜单
         k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
@@ -1752,11 +2487,7 @@ def v9_install(quiet: bool = False) -> int:
                                0, winreg.KEY_ALL_ACCESS)
         winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME)
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
-        # MultiSelectModel=Single 才是多选的关键:
-        #   Single   多选时只启动一次, 全部选中项一起作为 %1 传进来
-        #   Player   每张图各启动一次 (等于没批量)
-        #   Document 只在单选时才出现
-        winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Single")
+        winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
         c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
         winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(c)

@@ -37,6 +37,7 @@ _clean_v9.py
 _pack_v9.py
 _write_bat.py
 _fix_bat.py
+_mk_portable.py
 
 # Inno Setup 编译产物 (约 21MB, 只作为 Release 资产上传)
 _setup_out/

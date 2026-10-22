@@ -18,7 +18,7 @@ if not exist "%EXE%" (
 )
 
 echo ===============================================
-echo   PicShrink v9  Uninstaller
+echo   PicShrink v11  Uninstaller
 echo ===============================================
 echo.
 echo Removing: Explorer right-click menu,
@@ -36,7 +36,7 @@ if not "%RC%"=="0" (
     echo [DONE] Uninstallation finished.
 )
 echo.
-echo Log file: %TEMP%\picshrink_v9.log
+echo Log file: %TEMP%\picshrink_v11.log
 echo.
 pause
 exit /b %RC%

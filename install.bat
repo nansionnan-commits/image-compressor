@@ -15,7 +15,7 @@ if not exist "%EXE%" (
 )
 
 echo ===============================================
-echo   PicShrink v9  Installer
+echo   PicShrink v11  Installer
 echo ===============================================
 echo.
 echo Installing: Explorer right-click menu,
@@ -33,7 +33,7 @@ if not "%RC%"=="0" (
     echo [DONE] Installation finished.
 )
 echo.
-echo Log file: %TEMP%\picshrink_v9.log
+echo Log file: %TEMP%\picshrink_v11.log
 echo.
 pause
 exit /b %RC%
