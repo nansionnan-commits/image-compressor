@@ -37,7 +37,7 @@ _clean_v9.py
 _pack_v9.py
 _write_bat.py
 _fix_bat.py
-_mk_portable.py
+# _mk_portable.py 已移出忽略: 它是便携 ZIP 唯一的构建入口, 不入库就无法重建该资产
 
 # Inno Setup 编译产物 (约 21MB, 只作为 Release 资产上传)
 _setup_out/
