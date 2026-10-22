@@ -269,27 +269,21 @@ TOPICS = ["python", "image-compression", "image-optimization",
 
 def main() -> None:
     print("=== 1) Release ===")
-    v9_assets = [BASE / "dist/PicShrink-v9-portable.zip",
-                 BASE / "dist/PicShrink.exe",
-                 BASE / "app.ico"]
-    v10_assets = [BASE / "_setup_out/PicShrink-Setup-v10.exe",
-                  BASE / "dist/PicShrink.exe",
-                  BASE / "app.ico"]
+    # v9 / v10 的资产清单留着当历史记录, 但不再发 ——
+    # 这两个版本已经发完, 回炉会出事: dist/PicShrink.exe 是三个版本共用的
+    # 文件名, 每次跑都会删旧传新, 结果 v10 页面上的 PicShrink.exe 被换成
+    # v11 的 exe, 而同一页的安装器还是 v10, 用户下到的单文件版和安装版
+    # 对不上版本. 历史版本的页面就该原样冻结.
     v11_assets = [BASE / "_setup_out/PicShrink-Setup-v11.exe",
                   BASE / "dist/PicShrink-v11-portable.zip",
                   BASE / "dist/PicShrink.exe",
                   BASE / "app.ico"]
 
-    for tag, name, notes, assets in (
-        ("v9", "v9 — 右键快捷入口 + 便携版", NOTES_V9, v9_assets),
-        ("v10", "v10 — 标准 Windows 安装器", NOTES_V10, v10_assets),
-        ("v11", "v11 — 设置可自定义 + 备份可还原 + 多选右键修复",
-         NOTES_V11, v11_assets),
-    ):
-        print(f"\n[{tag}]")
-        rid, upload_base = ensure_release(tag, name, notes)
-        for p in assets:
-            sync_asset(rid, upload_base, p)
+    print(f"\n[v11]")
+    rid, upload_base = ensure_release(
+        "v11", "v11 — 设置可自定义 + 备份可还原 + 多选右键修复", NOTES_V11)
+    for p in v11_assets:
+        sync_asset(rid, upload_base, p)
 
     print("\n=== 2) 仓库 description ===")
     st, data = api("PATCH", API, {"description": DESCRIPTION})
