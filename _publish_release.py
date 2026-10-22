@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 import winreg
@@ -80,28 +81,49 @@ def ensure_release(tag: str, name: str, body: str):
     return data["id"], data["upload_url"].split("{")[0]
 
 
-def sync_asset(release_id: int, upload_base: str, path: Path):
+def sync_asset(release_id: int, upload_base: str, path: Path, attempts: int = 5):
+    """传一个资产。幂等 + 退避重试。
+
+    为什么不能"每次都删同名重传": 一轮里前两个资产传成功、第三个超时时,
+    重跑会把已成功的也删掉重传 —— 白烧一遍带宽, 且中途再失败就真的少了资产。
+    所以同名且大小一致就跳过, 只补缺的那一个。
+
+    为什么需要退避: GitHub 偶尔会 408 "Upload body timed out due to inactivity"
+    (几十 MB 的上传在慢网下很常见)。这是间歇故障, 重试一次通常就好。
+    """
     if not path.is_file():
         print(f"  [跳过] 文件不存在: {path}")
         return
+
+    size = path.stat().st_size
     st, data = api("GET", f"{API}/releases/{release_id}/assets?per_page=100")
     if st != 200:
         sys.exit(f"列资产失败: HTTP {st}")
-    for a in data:
+    for a in data or []:
         if a["name"] == path.name:
+            if a["state"] == "uploaded" and a.get("size") == size:
+                print(f"  [已就位] {path.name}  {size:,} 字节  跳过")
+                return
             st2, _ = api("DELETE", a["url"])
-            print(f"  删同名旧资产 {path.name}: HTTP {st2}")
+            print(f"  删同名残缺资产 {path.name} (state={a['state']}, "
+                  f"size={a.get('size')}): HTTP {st2}")
 
     ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    st, data = api(
-        "POST",
-        f"{upload_base}?name={path.name}",
-        raw=path.read_bytes(), ctype=ctype,
-    )
-    if st not in (200, 201):
-        sys.exit(f"上传 {path.name} 失败: HTTP {st} {data}")
-    print(f"  上传 {path.name}  {path.stat().st_size:,} 字节  "
-          f"({data['state']}, {data['browser_download_url']})")
+    body = path.read_bytes()
+    for i in range(attempts):
+        st, data = api("POST", f"{upload_base}?name={path.name}",
+                       raw=body, ctype=ctype)
+        if st in (200, 201):
+            print(f"  上传 {path.name}  {size:,} 字节  "
+                  f"(第 {i + 1} 次, {data['state']}, {data['browser_download_url']})")
+            return
+        wait = min(2 ** i, 20)
+        print(f"  上传 {path.name} 第 {i + 1}/{attempts} 次失败: HTTP {st} "
+              f"{data.get('message') if isinstance(data, dict) else data}"
+              f"  -> {wait}s 后重试")
+        if i < attempts - 1:
+            time.sleep(wait)
+    sys.exit(f"上传 {path.name} 连试 {attempts} 次仍失败: HTTP {st}")
 
 
 NOTES_V9 = """## 图瘦身 (PicShrink) v9 — 右键就能压
