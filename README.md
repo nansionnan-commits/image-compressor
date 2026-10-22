@@ -25,24 +25,44 @@
 
 ## 30 秒上手
 
+**方式 A：装到电脑上（推荐，有开始菜单、有卸载器）**
+
+```text
+1. 下载 releases 里最新的「PicShrink-Setup-v10.exe」
+2. 双击它，一路点「下一步」到「安装」
+3. 完事儿。桌面和开始菜单都有「图瘦身」
+4. 选中图片右键 → 「用图瘦身处理」（可多选）
+5. 想卸：设置 → 应用 → 找到「图瘦身 (PicShrink) v10」→ 卸载
+```
+
+**方式 B：不装，解压即用（绿色便携版）**
+
 ```text
 1. 下载 releases 里最新的「PicShrink-v9-portable.zip」
 2. 解压到任意文件夹
-3. 想装右键菜单 → 双击「install.bat」；只想用 → 直接双击「PicShrink.exe」
-4. 装完后：选中图片右键 → 「用图瘦身处理」（可多选）
-5. 或者双击桌面上的「图瘦身」打开完整界面，拖图进去压
-6. 去「输出」框指向的目录收成品
+3. 直接双击「PicShrink.exe」
+4. 想加右键菜单 → 双击「install.bat」
 ```
 
-不需要装 Python。只需要 Win 10 / 11 64 位。
+两种方式都**不需要装 Python**，只需要 Win 10 / 11 64 位。
 
 > 首次双击 Windows 可能弹「Windows 已保护你的电脑」（SmartScreen），点 **更多信息 → 仍要运行** 即可。我们的 exe 没做代码签名，这是已知限制，不是 bug。
 
 ---
 
-## v9：右键就能压，不用先拖进来
+## v10：装一次，右键就能压
 
-装好之后，图片压缩这件事**根本不用打开主界面**：
+安装器（`PicShrink-Setup-v10.exe`）是标准 Windows 向导式安装包：
+
+| 项 | 值 |
+|---|---|
+| 安装位置 | `%LOCALAPPDATA%\图瘦身\`（不需要管理员权限）|
+| 开始菜单 | 开始菜单里有一组「图瘦身」：主程序 + 卸载项 |
+| 桌面 | 桌面快捷方式「图瘦身」 |
+| 卸载 | 设置 → 应用 →「图瘦身 (PicShrink) v10」→ 卸载，**能点** |
+| 注册表 | 只写 `HKCU`，不影响别的账号 |
+
+装完之后，图片压缩这件事**根本不用打开主界面**：
 
 | 你做的事 | 结果 |
 |---|---|
@@ -66,14 +86,19 @@
 
 ### 安装 / 卸载
 
-| 文件 | 干什么 |
-|---|---|
-| `install.bat` | 装右键菜单（图片 / 文件夹）、SendTo、桌面快捷方式 |
-| `uninstall.bat` | 卸掉上面这些；**已压好的图片一律保留**，还会问你要不要删安装目录 |
+| 方式 | 文件 | 干什么 |
+|---|---|---|
+| **推荐** | `PicShrink-Setup-v10.exe` | 向导式安装：放文件 + 桌面/开始菜单图标 + 登记到「应用」列表可点的卸载器；顺带调用下面的 `--install` 把右键菜单、SendTo 一起配好 |
+| 便携 | `install.bat` | 装右键菜单（图片 / 文件夹）、SendTo、桌面快捷方式 |
+| 便携 | `uninstall.bat` | 卸掉上面这些；**已压好的图片一律保留**，还会问你要不要删安装目录 |
 
 安装只写 `HKCU`，不碰系统级注册表，不需要管理员权限，只对当前这个 Windows 账号生效。装完在资源管理器里按一下 `F5` 右键菜单就出现。
 
+走安装器卸载时，程序会先跑一次 `--uninstall --quiet` 清掉右键菜单 / SendTo / 桌面快捷方式（但**保留安装目录**），再由安装器自己删文件——两边分工不重叠，**你压好的图片一张都不会少**。
+
 > `install.bat` / `uninstall.bat` 内部是**纯 ASCII**，一个中文都没有。所有中文提示都由 exe 自己弹窗。这样做是因为 `.bat` 会被 cmd 按控制台码页解析，中文脚本在部分机器上会被切乱码导致连 exe 都找不到。
+>
+> Inno Setup 安装器不受这条限制——它是 Unicode 的，所以安装向导、开始菜单项、卸载项全都可以正常显示中文。
 
 ---
 
@@ -194,6 +219,12 @@ C:\Python314\python.exe -m pip install --upgrade pyinstaller pillow tkinterdnd2
 C:\Python314\python.exe -m PyInstaller 图瘦身.spec
 
 # 产物: dist\PicShrink.exe
+
+# 生成并编译安装器 (v10)
+C:\Python314\python.exe _mk_iss.py
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" setup.iss
+
+# 产物: _setup_out\PicShrink-Setup-v10.exe
 ```
 
 `图瘦身.spec` 里 `collect_all tkinterdnd2` 和 `datas = [('app.ico', '.')]` 都是必须的：前者保证 tkdnd 的 tcl/dll 进 onefile，后者让运行时读得到品牌图标、也让安装器能把图标取出来给右键菜单用。
@@ -206,9 +237,11 @@ exe 文件名定成 ASCII 的 `PicShrink` 而不是中文，就是为了让 `ins
 
 | 文件 | 作用 |
 |---|---|
-| `compress_images_gui.py` | **图瘦身 (PicShrink) v9 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标、v9 快捷入口与安装/卸载 |
+| `compress_images_gui.py` | **图瘦身 (PicShrink) v10 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标、v9 快捷入口与安装/卸载 |
 | `app.ico` | 品牌图标（256/128/64/48/32/16 多尺寸），打包时嵌入 exe |
 | `图瘦身.spec` | PyInstaller 打包配置（`--collect-all tkinterdnd2` + 嵌入 app.ico）|
+| `setup.iss` | Inno Setup 6 安装器脚本（v10）— 向导式安装 + 开始菜单 + 卸载器登记 |
+| `_mk_iss.py` | 生成 `setup.iss` 的脚本（带 UTF-8 BOM）|
 | `install.bat` / `uninstall.bat` | v9 纯 ASCII 安装 / 卸载壳，转调 `PicShrink.exe --install` / `--uninstall` |
 | `compress_images.py` | 命令行等价入口（同款 7 预设 + 目标体积模式）|
 | `_jpeg_strip.py` | JPEG 无损优化器（纯 Python，替代 jpegoptim）|
@@ -219,7 +252,19 @@ exe 文件名定成 ASCII 的 `PicShrink` 而不是中文，就是为了让 `ins
 
 ## 历史 & 版本
 
-### v9 — 右键快捷入口 + 安装器（2026-10）
+### v10 — 标准安装器（2026-10）
+
+- 新增 **Inno Setup 6 向导式安装包** `PicShrink-Setup-v10.exe`（约 21.2 MB）：下一步 / 安装 / 完成三步走，压缩包体积几乎不变（LZMA2 max + solid）
+- **开始菜单**里出现「图瘦身」组（主程序 + 卸载项），**桌面**快捷方式由安装器创建
+- **Windows「应用」（Add/Remove Programs）里可点击的真卸载器** — 登记名为「图瘦身 (PicShrink) v10」，不再需要用户自己翻目录找 `uninstall.bat`
+- 免管理员安装（`PrivilegesRequired=lowest`），与 v9 只写 `HKCU` 的设计保持一致
+- 安装目录与 v9 的 `_v9_install_dir()` **完全一致**（`%LOCALAPPDATA%\图瘦身`），不会出现两份安装
+- 桌面快捷方式用 `{userdesktop}` 而非 `{autodesktop}`——免管理员模式下后者指向公共桌面，普通用户装完看不到图标
+- 卸载分工不重叠：`--uninstall --quiet` 只清 HKCU / SendTo / 桌面快捷方式并**保留安装目录**，文件与快捷方式由 Inno 自己删
+- 压缩引擎、7 预设、快捷入口行为**一行未改**
+- 回归：安装器端到端 21/21，v9 五套全绿（源码 28/28、打包 exe 15/15、便携安装器 36/36、e2e 26/26、窗口验证 PASS）
+
+### v9 — 右键快捷入口 + 便携安装器（2026-10）
 
 - **资源管理器右键菜单**：图片右键（`MultiSelectModel=Single`，**多选一次压完**）、文件夹右键（自动递归）
 - **SendTo 条目** + **桌面快捷方式**，桌面路径走 Windows Known Folder API，**尊重用户把桌面重定向到别的盘**
@@ -263,7 +308,7 @@ v4 = Tkinter 旧版基线（不能拖图）。v3 之前是命令行版 + 拖 BAT
 ## 已知小坑（不影响功能）
 
 - **没做代码签名** → 第一次双击 Windows SmartScreen 会拦一下，点「更多信息 → 仍要运行」即可。
-- **全局自定义快捷键暂未提供**。v9 走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面图标这四条路，都是官方支持的机制。做成「任意界面按一个全局热键就压缩当前选中的图」需要常驻进程 + 读 Explorer 选中项 + 托盘 + 开机自启，属于 v9.1 的范围。
+- **全局自定义快捷键暂未提供**。v10 走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面与开始菜单图标这五条路，都是官方支持的机制。做成「任意界面按一个全局热键就压缩当前选中的图」需要常驻进程 + 读 Explorer 选中项 + 托盘 + 开机自启，属于 v10.1 的范围。
 - **`install.bat` 必须是纯 ASCII**。这是踩过坑之后定的：cmd 按活动控制台码页解析 `.bat`，中文脚本在码页不匹配时会被切乱码。中文提示一律由 exe 弹窗。
 
 ---

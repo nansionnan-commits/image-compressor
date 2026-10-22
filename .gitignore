@@ -32,10 +32,14 @@ build/
 _publish_release.ps1
 _release_args*.json
 _pkg_v9/
+_clean.py
 _clean_v9.py
 _pack_v9.py
 _write_bat.py
 _fix_bat.py
+
+# Inno Setup 编译产物 (约 21MB, 只作为 Release 资产上传)
+_setup_out/
 
 # 调试日志 (Flet 启动报错、stdout 抓取)
 flet*.txt
