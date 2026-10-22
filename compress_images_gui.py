@@ -2078,8 +2078,22 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
     """V9 快捷压缩主流程: 进度窗 → 后台压缩 → 结果窗."""
     files = _v9_expand(paths)
     if not files:
+        # v11: 把"到底收到了什么"直接摆给用户看。
+        # 原来只说"没找到可处理的图片", 用户根本不知道是自己没选中图,
+        # 还是 Explorer 传参出了问题, 只能反复点然后截图来问。
+        got = [p for p in paths if str(p).strip()]
+        if got:
+            why = ("程序收到了这些参数, 但它们都不是能读到的图片路径:\n"
+                   + "\n".join("  " + repr(p) for p in got[:6])
+                   + (f"\n  …共 {len(got)} 个" if len(got) > 6 else "")
+                   + "\n\n这通常说明右键菜单传参有问题, 请把这份内容发给作者。")
+        else:
+            why = ("程序一个路径都没收到。\n"
+                   "如果你是在右键菜单里点的, 多半是菜单项注册坏了。\n"
+                   "重装一次安装包即可修复。")
         _v9_fatal(
             "没找到可处理的图片。\n\n"
+            + why + "\n\n"
             "可以这样用:\n"
             "  · 选中图片右键 → 用图瘦身处理\n"
             "  · 选中文件夹 (自动递归所有图片)\n"
@@ -2437,6 +2451,96 @@ def _v9_install_step(n: int, total: int, text: str, lines: list[str]) -> None:
     lines.append(f"[{n}/{total}] {text}")
 
 
+def _v9_find_stale_installs(dest: Path) -> list[tuple[str, str]]:
+    """找出这台电脑上其它位置的图瘦身安装.
+
+    为什么需要这个:
+      Inno 记的是自己的 AppId, 装到哪儿就往"程序和功能"里写哪儿。
+      但历史上如果换过安装目录(比如 v8/v10 装在 D 盘, v11 改到 %LOCALAPPDATA%),
+      老的卸载登记项不会被自动清掉, 于是同一个程序在磁盘上留下两份 exe。
+      后果是: 右键菜单只指向其中一份, 另一份成了僵尸;
+              "程序和功能"里只能卸载一份, 另一份删不掉;
+              用户还以为是版本冲突, 其实是路径重影。
+    返回 [(路径, 说明), ...], 没有就返回空表。
+    """
+    import winreg
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(p: Path, why: str) -> None:
+        try:
+            key = str(p.resolve()).lower()
+        except OSError:
+            key = str(p).lower()
+        if key == str(dest.resolve()).lower() or key in seen:
+            return
+        seen.add(key)
+        found.append((str(p), why))
+
+    # 1) 扫卸载登记项(三个 hive 都要, 32/64 位各一份)
+    roots = [
+        (winreg.HKEY_CURRENT_USER,
+         r"Software\Microsoft\Windows\CurrentVersion\Uninstall", "HKCU"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"Software\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM(32位)"),
+    ]
+    for hive, sub, tag in roots:
+        try:
+            base = winreg.OpenKey(hive, sub, 0, winreg.KEY_READ)
+        except OSError:
+            continue
+        i = 0
+        while True:
+            try:
+                name = winreg.EnumKey(base, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                k = winreg.OpenKey(base, name, 0, winreg.KEY_READ)
+            except OSError:
+                continue
+            try:
+                # 卸载表里混着大量没有 DisplayName 的杂项键(补丁残留等),
+                # 直接 QueryValueEx 会 FileNotFoundError 把整个体检打断。
+                try:
+                    disp = str(winreg.QueryValueEx(k, "DisplayName")[0])
+                except OSError:
+                    continue
+                try:
+                    loc = str(winreg.QueryValueEx(k, "InstallLocation")[0])
+                except OSError:
+                    loc = ""
+            finally:
+                winreg.CloseKey(k)
+            if "picshrink" not in disp.lower() and V9_FOLDER_NAME not in disp:
+                continue
+            if loc:
+                p = Path(loc.strip().strip('"'))
+                if (p / "PicShrink.exe").is_file():
+                    _add(p, f"{tag} 卸载登记项还指向这里")
+            else:
+                _add(Path(name), f"{tag} 卸载登记项({disp})")
+
+    # 2) 扫几个历史上用过的目录 —— 没有卸载登记项的野安装
+    try:
+        drives = [Path(d + "\\") for d in ("C:", "D:", "E:", "F:")
+                  if Path(d + "\\").exists()]
+    except OSError:
+        drives = []
+    for d in drives:
+        p = d / V9_FOLDER_NAME
+        try:
+            if (p / "PicShrink.exe").is_file():
+                _add(p, "磁盘上还残留一份, 但卸载列表里没有它")
+        except OSError:
+            pass
+
+    return found
+
+
 def v9_install(quiet: bool = False) -> int:
     """装上右键菜单 / 发送到 / 桌面快捷方式. 返回退出码."""
     import shutil
@@ -2480,6 +2584,12 @@ def v9_install(quiet: bool = False) -> int:
     #   Player 支持任意数量, 再配合 "%*" 把所有选中项一次传进来。
     #   别改回 Single / "%1"。
     cmd = f'"{dst_exe}" "%*"'
+    # 文件夹菜单必须用 %V, 不能用 %*。
+    # %* 展开的是"选中的那批文件", 而 Directory\ 这个位置右键点的是文件夹本身,
+    # 没有"一批文件"可言 —— %* 会展开成空字符串, 程序收到零个参数,
+    # 结果是右键文件夹完全没反应(或报"没找到可处理的图片")。
+    # %V 才是当前文件夹的完整路径。
+    cmd_dir = f'"{dst_exe}" "%V"'
     try:
         # 2) 图片右键菜单
         k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
@@ -2501,7 +2611,7 @@ def v9_install(quiet: bool = False) -> int:
         winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME_DIR)
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
         c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
-        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
+        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd_dir)
         winreg.CloseKey(c)
         winreg.CloseKey(k)
         _v9_install_step(3, 5, "文件夹右键菜单 (自动递归)", lines)
@@ -2523,12 +2633,50 @@ def v9_install(quiet: bool = False) -> int:
     _v9_install_step(5, 5,
                      f"桌面快捷方式: {desk}" if ok_desk else "桌面快捷方式: 失败", lines)
 
+    # 6) 体检: 有没有别的位置还躺着一份老安装
+    stale = _v9_find_stale_installs(dest)
+    if stale:
+        lines.append("")
+        lines.append(f"⚠ 这台电脑上还发现 {len(stale)} 处旧安装:")
+        for sp, why in stale:
+            lines.append(f"   · {sp}")
+            lines.append(f"     ({why})")
+        lines.append("")
+        lines.append("不影响本次使用 —— 右键菜单只认上面刚装好的这一份。")
+        lines.append("但旧的那份会: ①在「程序和功能」里删不掉 ②让人怀疑是不是装重了")
+        lines.append("清掉方法: 确认新版本好用后, 直接删掉上面列出的文件夹即可。")
+        for sp, _ in stale:
+            _v9_log(f"[install] 发现旧安装残留: {sp}")
+
     _refresh_shell()
     out_dir = Path.home() / V9_DEFAULT_OUT
     summary = "\n".join(lines) + f"\n\n输出目录: {out_dir}\n原图永不覆盖。"
     _v9_log("[install] 完成\n" + summary)
 
-    if not quiet:
+    if stale:
+        # 旧安装残留一定要让人看见, 但 quiet 下绝不能弹模态框。
+        # 安装器就是用 --install --quiet 调本函数的, 弹框 = 无人值守安装被卡死,
+        # Inno 会一直等这个窗口, 用户看到的是"安装卡住了"。
+        # 静默安装的正规做法: 写日志 + 写结果文件, 让上层/用户事后能查到。
+        body = "\n".join(lines[-len(stale) * 2 - 4:])
+        warn = ("安装完成, 但发现这台电脑上还有旧版本残留:\n\n"
+                + body + "\n\n"
+                "这些是历史安装留下的副本, 不影响现在使用 ——\n"
+                "右键菜单只认刚装好的这一份。\n\n"
+                "但留着会有两个后果:\n"
+                "  · 「程序和功能」里只能卸载其中一份, 另一份删不掉\n"
+                "  · 以后右键菜单出怪问题, 会分不清是哪一份在作怪\n\n"
+                "建议: 确认新版本好用后, 直接把上面列出的文件夹删掉。")
+        _v9_log("[install][残留告警] " + warn)
+        try:
+            # 结果文件: 让"静默装完但有残留"这件事在磁盘上留痕, 不是无声无息
+            rf = dest / "install-warnings.txt"
+            rf.write_text(warn, encoding="utf-8")
+        except OSError:
+            pass
+        if not quiet:
+            _v9_box(V9_APP_TITLE, warn, error=True)
+    elif not quiet:
         _v9_box(V9_APP_TITLE,
                 f"安装完成!\n\n{summary}\n\n"
                 "用法:\n"
@@ -2649,7 +2797,13 @@ def main(preload: list[Path] | None = None):
 
 if __name__ == "__main__":
     _argv = sys.argv[1:]
+    # v11: 每次启动先把收到的原始参数落盘。
+    # windowed 打包没有 stderr, Explorer 右键传了什么在界面上根本看不见,
+    # 出了问题只能靠这一行定位 —— 之前"没找到可处理的图片"就是这么查的。
+    _v9_log(f"[argv] exe={_v9_self_exe()}")
+    _v9_log(f"[argv] raw={_argv!r}")
     _opts, _paths = _v9_parse(_argv)
+    _v9_log(f"[argv] paths={_paths!r} opts={_opts!r}")
     if not _argv:
         main()                                    # 双击 exe → 完整 GUI
     elif _opts["install"]:
