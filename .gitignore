@@ -38,6 +38,10 @@ _pack_v9.py
 _write_bat.py
 _fix_bat.py
 # _mk_portable.py 已移出忽略: 它是便携 ZIP 唯一的构建入口, 不入库就无法重建该资产
+# _shot_installed.py 也留在了外面: 它是验收"装到用户机器上的那个 exe"的唯一手段
+# _restore_user_settings.py 反过来 —— 它硬编码了本机的真实配置值(预设名/输出目录),
+# 属于事故恢复时的一次性脚本, 绝不能进仓库
+_restore_user_settings.py
 
 # Inno Setup 编译产物 (约 21MB, 只作为 Release 资产上传)
 _setup_out/

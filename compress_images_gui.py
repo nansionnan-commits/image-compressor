@@ -5,8 +5,8 @@
 版本: v11 (透明 PNG 不再崩溃 + 多选右键 + 持久化设置 + 备份可还原).
 
 核心能力 (相对早期 v3/v4):
-  - 7 个预设 (按"画质损失程度"分层):
-      两个无损 / 三个有损 / 两个目标体积 (200KB / 120KB).
+  - 10 个预设 (按"画质损失程度"分层):
+      两个无损 / 三个有损 / 五个目标体积 (📦 限边长 200KB / 120KB, 📐 尺寸不变 200KB / 500KB / 900KB).
   - 真实 OS 拖拽 (tkinterdnd2 + tkdnd 2.10+) — 不只是 Listbox, 整个窗口都能拖.
   - 目标体积模式: 长边限位 + 质量二分搜索, 选择能达标的最高质量 (下限 q18).
   - 输出撞原图时自动加 _compressed 后缀; 重复运行覆盖旧压缩输出, 原图永不覆盖.
@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import wintypes
 from pathlib import Path
@@ -56,7 +57,7 @@ except ImportError:
 
 SUPPORTED = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
-# ===== 7 个预设: 按"画质损失程度"分层 =====
+# ===== 预设: 按"画质损失程度"分层, 共 10 个 =====
 #   lossless    = 纯 Python 剥 EXIF (真 0 损失) + PIL PNG optimize
 #   balanced    = q=85 重编码 (业界甜点)
 #   aggressive  = q=80 重编码 (省最多)
@@ -74,18 +75,50 @@ PRESETS = {
     "🛒 亚马逊主图": {"mode": "balanced", "format": "jpg", "max_side": 2000,
                   "quality": 85, "keep_exif": False,
                   "desc": "2000px JPG 符合 Amazon 主图要求"},
-    "📦 主图≤200KB": {"mode": "target", "format": "jpg", "max_side": 1280,
+    # --- 📦 这一类: 会限制边长 (长宽比不变, 但像素会被缩小) ---
+    "📦 限边长1280 ≤200KB": {"mode": "target", "format": "jpg", "max_side": 1280,
                   "target_kb": 200, "quality": 90, "keep_exif": False,
-                  "desc": "长边 1280 + 自动降质量, 压到 ≤200KB"},
-    "📦 主图≤120KB": {"mode": "target", "format": "jpg", "max_side": 1100,
+                  "desc": "长边缩到 1280 + 自动降质量, 压到 ≤200KB"},
+    "📦 限边长1100 ≤120KB": {"mode": "target", "format": "jpg", "max_side": 1100,
                   "target_kb": 120, "quality": 90, "keep_exif": False,
-                  "desc": "长边 1100 + 自动降质量, 压到 ≤120KB"},
+                  "desc": "长边缩到 1100 + 自动降质量, 压到 ≤120KB"},
+    # --- 📐 这一类: 尺寸 / 比例 / 边长一个像素都不动, 只自动降质量 ---
+    # max_side=0 是关键, 千万别填数字:
+    #   A+ 各模块的像素尺寸是亚马逊硬性要求(970×300 / 1400×300 / 1920×600 ...),
+    #   缩了就直接不合规。而压体积只需要降质量就够了, 所以这几个预设
+    #   "只降质量, 一个像素都不动" —— 长宽比也天然保持不变, 不裁不补。
+    "📐 尺寸不变 ≤500KB": {"mode": "target", "format": "jpg", "max_side": 0,
+                  "target_kb": 500, "quality": 90, "keep_exif": False,
+                  "desc": "A+模块通用(限500KB), 尺寸/比例/边长完全不动, 只自动降质量"},
+    "📐 尺寸不变 ≤900KB": {"mode": "target", "format": "jpg", "max_side": 0,
+                  "target_kb": 900, "quality": 90, "keep_exif": False,
+                  "desc": "大图模块通用(限900KB), 尺寸/比例/边长完全不动, 只自动降质量"},
+    # ⚠ 新增的档位必须追加在 PRESETS 末尾, 不能插在中间!
+    #   --preset N 是按 PRESETS 的插入顺序编号的, 插中间会把后面所有序号
+    #   顶掉一位 —— 老快捷方式/脚本里的 "9"(900KB) 会静默变成 500KB。
+    #   界面上的显示顺序由下面的 PRESET_ROWS 决定, 跟这里的顺序解耦。
+    "📐 尺寸不变 ≤200KB": {"mode": "target", "format": "jpg", "max_side": 0,
+                  "target_kb": 200, "quality": 90, "keep_exif": False,
+                  "desc": "小体积档(限200KB), 尺寸/比例/边长完全不动, 只自动降质量"},
 }
 
-# 预设分两行显示 (一行塞不下 7 个按钮会被截断)
+# 预设改过名。旧名 -> 新名, 只为把老配置里的值搬过来, 不做两套名字并存
+# (并存的话 --preset 全名 和界面下拉框会各出现一份, 用户根本分不清哪个是哪个)。
+# ⚠ 以后任何改名都必须在这里补一行。否则用户 settings.json / quick.json 里
+#   存的旧名会在 _load_settings 里被判为非法, 静默回落到默认预设 —— 用户会发现
+#   自己选的 A+900 突然变成推荐压缩, 而且完全不知道为什么。
+PRESET_RENAMES = {
+    "📦 主图≤200KB": "📦 限边长1280 ≤200KB",
+    "📦 主图≤120KB": "📦 限边长1100 ≤120KB",
+    "📐 A+图≤500KB": "📐 尺寸不变 ≤500KB",
+    "📐 A+图≤900KB": "📐 尺寸不变 ≤900KB",
+}
+
+# 预设分三行显示 (一行塞不下 4 个以上按钮会被截断)
 PRESET_ROWS = [
     ["🎯 无损压缩", "💎 极致保真", "⚡ 推荐压缩", "💾 压最小"],
-    ["🛒 亚马逊主图", "📦 主图≤200KB", "📦 主图≤120KB"],
+    ["🛒 亚马逊主图", "📦 限边长1280 ≤200KB", "📦 限边长1100 ≤120KB"],
+    ["📐 尺寸不变 ≤200KB", "📐 尺寸不变 ≤500KB", "📐 尺寸不变 ≤900KB"],
 ]
 
 MODE_LABELS = {
@@ -597,9 +630,31 @@ def compress_to_bytes(src: Path, mode: str, quality: int,
 
 
 class App:
+    def report_callback_exception(self, exc, val, tb):
+        """回调里出错时给用户看, 别悄悄死掉.
+
+        exe 是 console=False 打的, 没有控制台, sys.stderr 是 None, Tk 默认的
+        报错路径什么也打印不出来。后果就是某个控件建到一半抛异常 → 窗口半截
+        停在中间, 用户看不到任何提示(设置窗口就因此丢过「保存」按钮),
+        只能理解成"这软件坏了"。所以这里必须弹框 + 落盘日志。
+        """
+        text = "".join(traceback.format_exception(exc, val, tb))
+        _v9_log(f"\n=== GUI 回调异常 ===\n{text}")
+        try:
+            messagebox.showerror(
+                "图瘦身 — 出错了",
+                f"这一步没能完成:\n\n{exc.__name__}: {val}\n\n"
+                f"详情已写到日志:\n"
+                f"{Path(os.environ.get('TEMP', '.')) / V9_LOG_NAME}",
+                parent=self.root)
+        except Exception:
+            pass
+
     def __init__(self, root):
         self.root = root
-        root.title("图瘦身 v11 (拖图片/文件夹进窗口, 7 预设 + 按目标体积压)")
+        # 标题里的预设数量必须动态取 —— 写死过一次("7 预设"), 加了档位之后
+        # 用户在标题栏看到的还是旧数字, 会以为预设没加上去。
+        root.title(f"图瘦身 v11 (拖图片/文件夹进窗口, {len(PRESETS)} 预设 + 按目标体积压)")
         root.geometry("1000x880")
         # 窗口图标 (含任务栏图标). 兼容 PyInstaller 单文件 (sys._MEIPASS).
         try:
@@ -650,16 +705,35 @@ class App:
 
         preset_frame = ttk.LabelFrame(left, text="★ 一键预设 (默认=推荐压缩 q=85)", padding=6)
         preset_frame.pack(fill="x", pady=4)
-        # 7 个预设分 2 行, 一行塞不下会被截断
+        # 预设按 PRESET_ROWS 分 3 行显示 (行宽上限 4, 再多 Tk 会挤到截断)
         for row_names in PRESET_ROWS:
             row = ttk.Frame(preset_frame)
             row.pack(fill="x")
-            for name in row_names:
-                ttk.Button(row, text=name, width=15,
-                           command=lambda n=name: self.apply_preset(n)).pack(side="left", padx=2, pady=2)
+            # ⚠ 绝对不要在这里写死 width=15。
+            #   ttk 的 width 是"固定多少个字符宽", 不是"至少多少"。预设名一旦
+            #   超宽, ttk 既不撑宽按钮也不换行, 而是直接把尾部**截断** ——
+            #   实测 133px 的名字塞在 115px 的按钮里, 结尾的 "≤200KB" 被切掉,
+            #   用户看到的是 "📦 限边长1280·", 根本看不出是多少 KB 的档位。
+            #   这里不传 width, 让 Tk 按文字精确自适应, 再用 grid 的 uniform
+            #   让同一行的格子等宽(取本行最宽那个): 既不截断, 也不宽窄不齐。
+            for i, name in enumerate(row_names):
+                ttk.Button(row, text=name,
+                           command=lambda n=name: self.apply_preset(n)
+                           ).grid(row=0, column=i, padx=2, pady=2, sticky="ew")
+                row.columnconfigure(i, weight=0, uniform="preset")
         self.preset_hint = ttk.Label(preset_frame, text="默认: ⚡ 推荐压缩 (q=85 业界甜点)",
                                       foreground="#06c", wraplength=380)
         self.preset_hint.pack(anchor="w", padx=4, pady=2)
+        # 这两行图例必须独立成控件, 不能拼进 preset_hint:
+        # apply_preset() 会把 preset_hint 的文字整个换成 "已选/已保存 xxx",
+        # 写在 hint 里的话窗口一开就被冲掉了, 用户永远看不到。
+        # 讲清楚两类预设的区别, 是让用户不点错的关键 —— 名字再短也不够。
+        self.preset_legend = ttk.Label(
+            preset_frame,
+            text="📦 限边长xxx = 会缩小长边像素, 主图/缩略图用\n"
+                 "📐 尺寸不变 = 像素/比例/边长全不动, 只压体积, A+ 各模块用",
+            foreground="#c80", wraplength=380)
+        self.preset_legend.pack(anchor="w", padx=4, pady=(0, 2))
 
         self.show_custom = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="显示自定义参数 (高级用户)",
@@ -796,7 +870,8 @@ class App:
         ttk.Label(
             right,
             text="💡 默认=推荐压缩 (q=85 业界甜点).\n"
-                 "   📦 两个预设按目标体积压: 自动二分搜索最高能达标的质量.\n"
+                 "   目标体积档自动二分搜索最高能达标的质量:\n"
+                 "     📦 会把长边缩到 1280/1100; 📐 尺寸比例边长一个像素都不动.\n"
                  "   原图只读, 永不覆盖; 输出同名会自动加 _compressed 后缀.\n"
                  "   预览用内存压缩, 不写盘不污染输出.",
             foreground="#999", wraplength=240, justify="left",
@@ -844,7 +919,14 @@ class App:
         if not silent:
             # v9: 手动换预设时记一笔, 右键快捷入口下次就直接用这个
             _v9_save_preset(name)
-            self._log(f">>> 预设: {name}  ({p['desc']})\n")
+            # 保存后必须刷新那行"右键菜单默认"。不刷新的话它永远停在旧值,
+            # 用户点了预设、文件也写了, 但界面上看不出任何变化 —— 会被当成
+            # "没保存", 每次都以为是默认值。
+            self._refresh_settings_hint()
+            self.preset_hint.config(
+                text=f"✓ 已保存为右键默认: {name}  ({p['desc']})")
+            self._log(f">>> 预设: {name}  ({p['desc']})"
+                      f" —— 已保存, 右键菜单下次就用它\n")
         self._refresh_preview()
 
     def pick_files(self):
@@ -960,8 +1042,24 @@ class App:
         cfg = _load_settings()
         f = ("Microsoft YaHei UI", 9)
 
+        # ⚠ 必须记住的 Tk 8.6 坑: ttk::radiobutton 和 ttk::checkbutton 跟别的
+        # ttk 控件不一样, 它们不接受 -font 参数, 直接 font= 会抛
+        # "TclError: unknown option \"-font\"", 而这个异常发生在建控件阶段,
+        # 整个 open_settings 当场死掉 —— 窗口开不起来, 用户永远看不到保存按钮,
+        # 于是"选了预设没保存、每次都是默认值"。字体只能通过 Style 传。
+        _st = ttk.Style(top)
+        _st.configure("CfgRadio.TRadiobutton", font=f)
+        _st.configure("CfgCheck.TCheckbutton", font=f)
+
         pad = ttk.Frame(top, padding=16)
         pad.pack(fill="both", expand=True)
+
+        # --- 0. 顶部工具栏 (先占位, 内容在 save() 定义之后填) ---
+        # 这个窗口内容很长(预设+格式+输出+备份), 在小屏/125%·150% 缩放下底部会被
+        # 切到屏幕外, 保存按钮正好在最下面 = 用户根本点不到。所以顶部也放一份,
+        # 并且明确写"改完要保存", 免得以为选了就生效。
+        topbar = ttk.Frame(pad)
+        topbar.pack(fill="x", pady=(0, 10))
 
         # --- 1. 右键菜单默认预设 ---
         ttk.Label(pad, text="右键菜单默认压缩到", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
@@ -998,12 +1096,12 @@ class App:
             "overwrite": "直接覆盖原图片（覆盖前自动备份，可还原）",
             "fixed": "统一导出到你指定的固定目录",
         }
-        radios = []
+        # 三个输出模式单选框: 一律永远可点(见 on_mode 里的说明)。
+        # 互斥由共享的 variable=ov 自动完成, 不需要、也不允许在这里 disable 任何一个。
         for key in OUTPUT_MODES:
-            r = ttk.Radiobutton(pad, text=OUTPUT_MODE_LABELS[key], value=key,
-                                variable=ov, font=f)
-            r.pack(anchor="w", fill="x")
-            radios.append(r)
+            ttk.Radiobutton(pad, text=OUTPUT_MODE_LABELS[key], value=key,
+                            variable=ov, style="CfgRadio.TRadiobutton").pack(
+                anchor="w", fill="x")
 
         dirf = ttk.Frame(pad)
         dirf.pack(fill="x", pady=(4, 0))
@@ -1025,16 +1123,19 @@ class App:
         ackv = tk.BooleanVar(value=bool(cfg.get("overwrite_ack")))
         ackb = ttk.Checkbutton(
             pad, text="我知道「覆盖原图」有风险（覆盖前会自动备份，出问题能还原）",
-            variable=ackv, font=f)
+            variable=ackv, style="CfgCheck.TCheckbutton")
         ackb.pack(anchor="w", pady=(6, 0))
 
         def on_mode(*_):
+            # ⚠ 这里绝对不要再去 disable 三个单选框中的"非选中项"。
+            # 踩过的坑: 旧代码在 m == "fixed" 时把另外两个单选框 state(["disabled"]),
+            # 想着"固定目录模式是排他选择"——结果用户自己的设置停在 fixed 时,
+            # 一打开设置窗口「原文件夹导出」「覆盖原图」就是灰的, 点不动,
+            # 整个输出模式看起来"没法选"(tkinter 的禁用态是灰字, 不是消失,
+            # 所以用户报的是"没有这个选项/不能选")。
+            # 单选互斥本来就由共享的 variable=ov 自动完成, 三个框必须永远可点。
+            # 真正该跟着模式开关的是下面的"固定目录"输入框和覆盖确认勾选框。
             m = ov.get()
-            for r in radios:
-                if r.cget("value") == m:
-                    r.state(["!disabled"])
-                else:
-                    r.state(["disabled"]) if m == "fixed" else None
             dirf.state(["disabled"] if m != "fixed" else ["!disabled"])
             warn.config(text=notes.get(m, ""))
             if m == "overwrite":
@@ -1094,13 +1195,29 @@ class App:
             if _save_settings(new):
                 self._log(f">>> 设置已保存: 预设={new['preset']} 格式={new['format']} "
                           f"输出={OUTPUT_MODE_LABELS[new['output_mode']]}\n")
-                messagebox.showinfo("图瘦身", "设置已保存，右键菜单下次就按这个来。", parent=top)
+                # 主界面那行"右键菜单默认"要跟着刷新, 否则关了设置窗口后
+                # 它还显示旧值, 用户会以为没保存
+                self._refresh_settings_hint()
+                messagebox.showinfo(
+                    "图瘦身",
+                    f"已保存。\n\n"
+                    f"右键菜单默认预设: {new['preset']}\n"
+                    f"输出位置: {OUTPUT_MODE_LABELS[new['output_mode']]}\n\n"
+                    f"以后在资源管理器里右键选图, 就按这个来。",
+                    parent=top)
                 top.destroy()
             else:
                 messagebox.showerror("图瘦身", "设置保存失败，权限不足？", parent=top)
 
         ttk.Button(btns, text="保存", command=save).pack(side="right")
         ttk.Button(btns, text="取消", command=top.destroy).pack(side="right", padx=6)
+
+        # 顶部那份(见前面 topbar 的说明): 底部那个在矮屏幕上会被切出屏幕外
+        ttk.Button(topbar, text="💾 保存并关闭", command=save).pack(side="right")
+        ttk.Button(topbar, text="取消", command=top.destroy).pack(side="right", padx=6)
+        ttk.Label(topbar, text="⚠ 这里改的是「右键菜单」的默认行为, 改完要点保存才生效",
+                  font=("Microsoft YaHei UI", 8), foreground="#c0392b"
+                  ).pack(side="left")
 
         top.bind("<Escape>", lambda e: top.destroy())
         top.update_idletasks()
@@ -1437,7 +1554,7 @@ class App:
                                 f"{skip} 张全部原样保留:\n"
                                 f"· 小于 50KB 的不压\n"
                                 f"· 无损预设: 这批图没 EXIF 可剥, 省不下空间\n\n"
-                                f"想真压, 换 ⚡ 推荐压缩 或 📦 主图≤200KB")
+                                f"想真压, 换 ⚡ 推荐压缩 或 📦 限边长1280 ≤200KB")
                         else:
                             self.status.config(text=f"搞定! 压缩 {ok}, 跳过 {skip}")
                             extra = (f"\n⚠ {missed} 张没压到目标体积 (已用最低质量), "
@@ -1466,9 +1583,9 @@ class App:
 # ============================================================
 #  行为约定:
 #    不带参数            → 打开完整 GUI
-#    带图片/文件夹路径    → 直接压缩 (走上面同一套 7 预设引擎), 弹结果窗
+#    带图片/文件夹路径    → 直接压缩 (走上面同一套预设引擎), 弹结果窗
 #    --gui               → 打开 GUI 并把文件预载进待压缩列表 (不直接压)
-#    --preset N|全名     → 指定预设 (1-7 或全名), 默认沿用 GUI 里手动选过的那个
+#    --preset N|全名     → 指定预设 (1-10 或全名), 默认沿用 GUI 里手动选过的那个
 #    --out DIR           → 输出根目录, 默认 %USERPROFILE%\picshrink_out
 #    --format keep|jpg|png|webp → 覆盖预设里的输出格式
 #    --no-notify         → 不弹任何窗 (给脚本 / 自动化测试用)
@@ -1568,6 +1685,12 @@ def _load_settings() -> dict:
             break
         except Exception:
             continue
+    # 预设改名迁移: 必须先换名, 再校验。
+    # 顺序反了就会出事 —— 旧名在 PRESETS 里查不到, 直接被判非法, 静默
+    # 回落到默认预设, 用户会发现"我明明选的 A+900, 怎么变成推荐压缩了",
+    # 而且完全不知道为什么。
+    if s.get("preset") in PRESET_RENAMES:
+        s["preset"] = PRESET_RENAMES[s["preset"]]
     # 逐字段校验, 配置文件是人手改的, 不能直接信
     if s.get("preset") not in PRESETS:
         s["preset"] = V9_FALLBACK_PRESET
@@ -1606,7 +1729,8 @@ def _v9_save_preset(name: str) -> None:
     if name not in PRESETS:
         return
     s = _load_settings()
-    s["preset"] = name
+    # 存进去的一定要是新名, 否则下一次读配置时又得靠迁移兜一遍
+    s["preset"] = PRESET_RENAMES.get(name, name)
     _save_settings(s)
 
 
@@ -1789,7 +1913,11 @@ def _v9_parse(argv: list[str]):
             else:
                 opts["help"] = True
         elif not a.startswith("-"):
-            paths.append(a)
+            # Explorer 偶尔会塞空串进来(菜单命令里的占位符没展开时就是这种情况,
+            # 实测收到过 raw=[''])。留着的话"收到 0 个路径"会变成"收到 1 个空路径",
+            # 现象一样但根因完全不同, 事后查日志会被带偏。这里直接丢掉。
+            if a.strip():
+                paths.append(a)
         i += 1
     return opts, paths
 
@@ -1836,12 +1964,15 @@ def _v9_expand(paths: list[str]) -> list[Path]:
 
 
 def _v9_resolve_preset(spec: str | None) -> str:
-    """预设可以是全名 / 1-7 序号 / mode 名 (balanced 之类)."""
+    """预设可以是全名 / 1-{len(PRESETS)} 序号 / mode 名 (balanced 之类)."""
     if not spec:
         return _v9_load_preset()
     s = spec.strip()
     if s in PRESETS:
         return s
+    # 预设改过名: 老快捷方式里可能还写着旧的全名, 照样认, 别让人直接报错
+    if s in PRESET_RENAMES:
+        return PRESET_RENAMES[s]
     if s.isdigit():
         idx = int(s)
         keys = list(PRESETS.keys())
@@ -2577,17 +2708,24 @@ def v9_install(quiet: bool = False) -> int:
     _v9_install_step(1, 5, f"主程序: {dst_exe}", lines)
 
     icon = f"{dest / 'app.ico'},0" if (dest / "app.ico").is_file() else str(dst_exe)
-    # 多选必须用 Player + "%*":
-    #   Microsoft 文档规定 MultiSelectModel=Single 只支持单选,
-    #   选中数量跟模型对不上时 Explorer 直接不显示这个菜单项 ——
-    #   这正是"单选有菜单、多选没了"的原因。
-    #   Player 支持任意数量, 再配合 "%*" 把所有选中项一次传进来。
-    #   别改回 Single / "%1"。
-    cmd = f'"{dst_exe}" "%*"'
-    # 文件夹菜单必须用 %V, 不能用 %*。
-    # %* 展开的是"选中的那批文件", 而 Directory\ 这个位置右键点的是文件夹本身,
-    # 没有"一批文件"可言 —— %* 会展开成空字符串, 程序收到零个参数,
-    # 结果是右键文件夹完全没反应(或报"没找到可处理的图片")。
+    # 文件菜单: 不写 MultiSelectModel, 命令用 "%1"。
+    #
+    # 这块注释是被真机 Explorer 打脸两次之后重写的:
+    #   v9  MultiSelectModel=Single  → 多选时菜单根本不显示。
+    #   v11 MultiSelectModel=Player + "%*" → 菜单显示, 点下去收到 raw=[''],
+    #       一个空字符串参数, 零个路径, 比 v11 还让人一头雾水。
+    #
+    # 根因: MultiSelectModel 的 Player/Document 会把交给程序的命令行
+    # 限制得极短, 而我们的 exe 路径本来就 50+ 字符, "%*" 直接被展开成空串。
+    # 本机注册表取证也印证了 —— 9 个文件右键动词里 8 个是"不写 MultiSelectModel
+    # + \"%1\""(美图秀修 / ToDesk / Tailscale / 夸克), 唯一写 Player+%* 的就是
+    # 图瘦身, 也是唯一坏掉的。
+    #
+    # 正确写法: 不写 MultiSelectModel。默认模型下 "%1" 会展开成全部选中项
+    # (每个各自带引号), 路径长短不影响, 多选一直是好的。别再加回去。
+    cmd = f'"{dst_exe}" "%1"'
+    # 文件夹菜单必须用 %V, 不能用 %*: Directory\ 这个位置右键点的是文件夹本身,
+    # 没有"一批文件"可言, %* 会展开成空字符串 (v11 的实测教训)。
     # %V 才是当前文件夹的完整路径。
     cmd_dir = f'"{dst_exe}" "%V"'
     try:
@@ -2597,7 +2735,12 @@ def v9_install(quiet: bool = False) -> int:
                                0, winreg.KEY_ALL_ACCESS)
         winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME)
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
-        winreg.SetValueEx(k, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+        # 升级必须主动删掉旧的 MultiSelectModel。SetValueEx 只写不删,
+        # 老值留在那儿等于这次修复根本没生效 —— 这是最容易漏的一步。
+        try:
+            winreg.DeleteValue(k, "MultiSelectModel")
+        except FileNotFoundError:
+            pass
         c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
         winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(c)
@@ -2804,7 +2947,16 @@ if __name__ == "__main__":
     _v9_log(f"[argv] raw={_argv!r}")
     _opts, _paths = _v9_parse(_argv)
     _v9_log(f"[argv] paths={_paths!r} opts={_opts!r}")
-    if not _argv:
+    _has_action = any(_opts[k] for k in ("install", "uninstall", "help",
+                                          "list_presets", "gui"))
+    # 双击 exe → 完整 GUI。
+    # 另外: 右键菜单一个真实路径都没传进来时(raw=[''] 这类), 也走 GUI。
+    # 以前这里弹"没找到可处理的图片"的大红叉, 但用户当时既没选图也没输命令,
+    # 根本无从下手; 直接把主界面打开, 至少人是能用的, 而且 raw 已经落盘,
+    # 真要查根因日志里有证据。
+    if not _argv or (not _paths and not _has_action):
+        if _argv:
+            _v9_log("[argv] 一个真实路径都没收到, 按双击处理 → 打开完整 GUI")
         main()                                    # 双击 exe → 完整 GUI
     elif _opts["install"]:
         sys.exit(v9_install(quiet=_opts["quiet"]))

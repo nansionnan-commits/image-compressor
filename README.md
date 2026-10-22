@@ -28,18 +28,18 @@
 **方式 A：装到电脑上（推荐，有开始菜单、有卸载器）**
 
 ```text
-1. 下载 releases 里最新的「PicShrink-Setup-v11.1.exe」
+1. 下载 releases 里最新的「PicShrink-Setup-v11.2.exe」
 2. 双击它，一路点「下一步」到「安装」
 3. 完事儿。桌面和开始菜单都有「图瘦身」
 4. 选中图片右键 → 「用图瘦身处理」（可多选）
 5. 想改默认行为 → 打开图瘦身，点「⚙ 设置」
-6. 想卸：设置 → 应用 → 找到「图瘦身 (PicShrink) v11.1」→ 卸载
+6. 想卸：设置 → 应用 → 找到「图瘦身 (PicShrink) v11.2」→ 卸载
 ```
 
 **方式 B：不装，解压即用（绿色便携版）**
 
 ```text
-1. 下载 releases 里最新的「PicShrink-v11.1-portable.zip」
+1. 下载 releases 里最新的「PicShrink-v11.2-portable.zip」
 2. 解压到任意文件夹
 3. 直接双击「PicShrink.exe」
 4. 想加右键菜单 → 双击「install.bat」
@@ -48,6 +48,54 @@
 两种方式都**不需要装 Python**，只需要 Win 10 / 11 64 位。
 
 > 首次双击 Windows 可能弹「Windows 已保护你的电脑」（SmartScreen），点 **更多信息 → 仍要运行** 即可。我们的 exe 没做代码签名，这是已知限制，不是 bug。
+
+---
+
+## v11.2：预设名字终于说人话了 + 多一档小体积
+
+### 之前名字看不懂在哪
+
+老名字叫「📦 主图≤200KB」「📐 A+图≤500KB」，问题在于：**光看名字猜不出它到底动没动你的像素**。
+
+「主图≤200KB」到底是缩到 1280 还是缩到 1100？「A+图≤500KB」到底会不会偷偷改尺寸？名字里一个字都没提。而这两种行为**恰好相反**，猜错了就是货不对板。
+
+### 现在：名字直接写清楚改了什么
+
+| 老名字 | 新名字 | 差别 |
+|---|---|---|
+| `📦 主图≤200KB` | `📦 限边长1280 ≤200KB` | 会缩，长边压到 1280 |
+| `📦 主图≤120KB` | `📦 限边长1100 ≤120KB` | 会缩，长边压到 1100 |
+| `📐 A+图≤500KB` | `📐 尺寸不变 ≤500KB` | **一个像素都不动** |
+| `📐 A+图≤900KB` | `📐 尺寸不变 ≤900KB` | **一个像素都不动** |
+| — | `📐 尺寸不变 ≤200KB` | **新增**，同样不动尺寸 |
+
+分界线很干脆：**带「📦 限边长」的会缩，不带的就是「📐 尺寸不变」——尺寸、比例、边长一个像素都不动，只降质量。**
+
+### 为什么要专门留「尺寸不变」这一档
+
+A+ 各模块的像素尺寸是平台硬性要求（`970×300`、`1400×300`、`1920×600` 等），**缩了就直接不合规**。而压体积只需要降质量就够了，完全没必要动尺寸。
+
+以前「A+图≤900KB」这个名字让人以为它会偷偷缩图。现在它叫「尺寸不变 ≤900KB」，用的人一眼就知道这张图拿去贴 A+ 是安全的。
+
+### 新增 ≤200KB 小体积档
+
+之前最小只到 500KB。有些模块塞 500KB 太奢侈，现在加一档 **200KB**，同样只降质量。
+
+> 这里的 500 / 900 / 200 KB 是工具给出的**保守目标**，不是平台的官方数字。平台实际限制请以你所在站点的后台要求为准。
+
+### 改名不用你做任何事
+
+你之前在设置里选的预设，**升级后自动还是那个**，不会静默变回「推荐压缩」—— 老名字会被自动搬到新名字上。界面和设置里存的旧全名也照样认。
+
+### 预设总数：7 → 10
+
+| 类型 | 数量 | 说明 |
+|---|---|---|
+| 无损 | 2 | 像素零差异 |
+| 固定质量 | 2 | q=85 / q=80 |
+| 📦 限边长 | 2 | 缩尺寸 + 控体积 |
+| 📐 尺寸不变 | 3 | 只降质量，200 / 500 / 900KB |
+| 🛒 亚马逊主图 | 1 | 2000px JPG |
 
 ---
 
@@ -91,7 +139,7 @@ v11.1 把文件夹那行换成 `"%V"`（当前文件夹的完整路径）。现�
 
 | 设置项 | 可选值 | 默认 |
 |---|---|---|
-| 右键菜单默认用哪个预设 | 7 个预设任选 | ⚡ 推荐压缩 |
+| 右键菜单默认用哪个预设 | 10 个预设任选 | ⚡ 推荐压缩 |
 | 右键菜单默认输出什么格式 | 保持原格式 / JPG / PNG / WebP | **保持原格式** |
 | 右键菜单默认导出到哪 | 三种模式，见下 | 原文件夹加后缀 |
 
@@ -121,14 +169,14 @@ v11.1 把文件夹那行换成 `"%V"`（当前文件夹的完整路径）。现�
 
 ## v10：装一次，右键就能压
 
-安装器（`PicShrink-Setup-v11.1.exe`）是标准 Windows 向导式安装包：
+安装器（`PicShrink-Setup-v11.2.exe`）是标准 Windows 向导式安装包：
 
 | 项 | 值 |
 |---|---|
 | 安装位置 | `%LOCALAPPDATA%\图瘦身\`（不需要管理员权限）|
 | 开始菜单 | 开始菜单里有一组「图瘦身」：主程序 + 卸载项 |
 | 桌面 | 桌面快捷方式「图瘦身」 |
-| 卸载 | 设置 → 应用 →「图瘦身 (PicShrink) v11.1」→ 卸载，**能点** |
+| 卸载 | 设置 → 应用 →「图瘦身 (PicShrink) v11.2」→ 卸载，**能点** |
 | 注册表 | 只写 `HKCU`，不影响别的账号 |
 
 装完之后，图片压缩这件事**根本不用打开主界面**：
@@ -148,7 +196,7 @@ v11.1 把文件夹那行换成 `"%V"`（当前文件夹的完整路径）。现�
 
 | 方式 | 文件 | 干什么 |
 |---|---|---|
-| **推荐** | `PicShrink-Setup-v11.1.exe` | 向导式安装：放文件 + 桌面/开始菜单图标 + 登记到「应用」列表可点的卸载器；顺带调用下面的 `--install` 把右键菜单、SendTo 一起配好 |
+| **推荐** | `PicShrink-Setup-v11.2.exe` | 向导式安装：放文件 + 桌面/开始菜单图标 + 登记到「应用」列表可点的卸载器；顺带调用下面的 `--install` 把右键菜单、SendTo 一起配好 |
 | 便携 | `install.bat` | 装右键菜单（图片 / 文件夹）、SendTo、桌面快捷方式 |
 | 便携 | `uninstall.bat` | 卸掉上面这些；**已压好的图片一律保留**，还会问你要不要删安装目录 |
 
@@ -162,21 +210,26 @@ v11.1 把文件夹那行换成 `"%V"`（当前文件夹的完整路径）。现�
 
 ---
 
-## 7 个预设
+## 10 个预设
 
-双行排布按钮，一行点不全也会自动换行不会被截：
+按钮按行均分宽度，每行按本页名字最长的那个撑开，**点不全也不会被截断**：
 
-| 预设 | 干啥 | JPG 省多少 | 画质 |
+| 预设 | 干啥 | 会缩尺寸吗 | JPG 省多少 |
 |---|---|---|---|
-| 🎯 **无损压缩** | 剥 EXIF，**像素零差异** | 5–20% | **数学零损失** |
-| 💎 **极致保真** | 同上，但保留 EXIF 拍摄信息 | 少一点 | **数学零损失** |
-| ⚡ **推荐压缩** | q=85 重编码，业界甜点 | ~25% | 肉眼难辨 |
-| 💾 **压最小** | q=80 重编码 | 最多 | 细看能看出 |
-| 🛒 **亚马逊主图** | 转 JPG + 长边 2000px + q=85 | 很多 | 好，符合 Amazon 主图要求 |
-| 📦 **主图 ≤ 200KB** | 长边 1280 + 自动二分搜索质量 | 自动达标 | 肉眼难辨 |
-| 📦 **主图 ≤ 120KB** | 长边 1100 + 自动二分搜索质量 | 自动达标 | 肉眼难辨 |
+| 🎯 **无损压缩** | 剥 EXIF，**像素零差异** | 否 | 5–20% |
+| 💎 **极致保真** | 同上，但保留 EXIF 拍摄信息 | 否 | 少一点 |
+| ⚡ **推荐压缩** | q=85 重编码，业界甜点 | 否 | ~25% |
+| 💾 **压最小** | q=80 重编码 | 否 | 最多 |
+| 🛒 **亚马逊主图** | 转 JPG + 长边 2000px + q=85 | **是**，2000px | 很多 |
+| 📦 **限边长1280 ≤200KB** | 缩到 1280 + 自动二分搜索质量 | **是**，1280 | 自动达标 |
+| 📦 **限边长1100 ≤120KB** | 缩到 1100 + 自动二分搜索质量 | **是**，1100 | 自动达标 |
+| 📐 **尺寸不变 ≤900KB** | 只降质量 | **否** | 自动达标 |
+| 📐 **尺寸不变 ≤500KB** | 只降质量 | **否** | 自动达标 |
+| 📐 **尺寸不变 ≤200KB** | 只降质量 | **否** | 自动达标 |
 
-**两个目标体积预设的原理**：先把图等比缩放到长边限制，然后在质量区间 [18, 92] 里**二分搜索**——找到刚好不超过目标字节数的最高质量。降质量比硬降像素能保住更多细节。
+**「会缩尺寸吗」这一列是选预设时唯一要看的。** 带 `📦 限边长` 的会把图缩小，带 `📐 尺寸不变` 的尺寸、比例、边长一个像素都不动、只降质量。
+
+**五个目标体积预设的原理**：先把图等比缩到该预设的边长限制（`📐` 那一类是 0，即不缩），然后在质量区间 [18, 92] 里**二分搜索**——找到刚好不超过目标字节数的最高质量。降质量比硬降像素能保住更多细节。
 
 > 如果压到最低质量（q=18）**仍然大于原图**（这只在「目标体积 + PNG + 保持原格式」这种组合下会发生，因为对 PNG 降质量几乎没用），v11 会**直接跳过并保留原图**，绝不给你一个比原来更大的文件。日志里会写清楚原因。
 >
@@ -286,11 +339,11 @@ C:\Python314\python.exe -m PyInstaller 图瘦身.spec
 
 # 产物: dist\PicShrink.exe
 
-# 生成并编译安装器 (v11.1)
+# 生成并编译安装器 (v11.2)
 C:\Python314\python.exe _mk_iss.py
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" setup.iss
 
-# 产物: _setup_out\PicShrink-Setup-v11.1.exe
+# 产物: _setup_out\PicShrink-Setup-v11.2.exe
 ```
 
 > `--clean` 重新打包前先结束残留的 `PicShrink.exe`，否则 `dist\PicShrink.exe` 被占用会直接报 `WinError 5`。
@@ -305,10 +358,10 @@ exe 文件名定成 ASCII 的 `PicShrink` 而不是中文，就是为了让 `ins
 
 | 文件 | 作用 |
 |---|---|
-| `compress_images_gui.py` | **图瘦身 (PicShrink) v11.1 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标、右键快捷入口与安装/卸载、设置持久化与备份还原、旧安装体检 |
+| `compress_images_gui.py` | **图瘦身 (PicShrink) v11.2 入口** — Tkinter + tkinterdnd2 OS 拖拽，自带压缩引擎、`_safe_out_path()`、目标体积模式二分搜索、应用图标、右键快捷入口与安装/卸载、设置持久化与备份还原、旧安装体检 |
 | `app.ico` | 品牌图标（256/128/64/48/32/16 多尺寸），打包时嵌入 exe |
 | `图瘦身.spec` | PyInstaller 打包配置（`--collect-all tkinterdnd2` + 嵌入 app.ico）|
-| `setup.iss` | Inno Setup 6 安装器脚本（v11.1）— 向导式安装 + 开始菜单 + 卸载器登记 |
+| `setup.iss` | Inno Setup 6 安装器脚本（v11.2）— 向导式安装 + 开始菜单 + 卸载器登记 |
 | `_mk_iss.py` | 生成 `setup.iss` 的脚本（带 UTF-8 BOM）|
 | `_mk_portable.py` | 生成便携 ZIP 的脚本（校验 bat 必须纯 ASCII + 全 CRLF）|
 | `install.bat` / `uninstall.bat` | 纯 ASCII 安装 / 卸载壳，转调 `PicShrink.exe --install` / `--uninstall` |
@@ -320,6 +373,27 @@ exe 文件名定成 ASCII 的 `PicShrink` 而不是中文，就是为了让 `ins
 ---
 
 ## 历史 & 版本
+
+### v11.2 — 预设名字说人话了 + 新增 200KB 档（2026-10）
+
+**改名（4 个）**，目的是让名字直接回答「到底动没动我的像素」：
+
+| 老名字 | 新名字 |
+|---|---|
+| `📦 主图≤200KB` | `📦 限边长1280 ≤200KB` |
+| `📦 主图≤120KB` | `📦 限边长1100 ≤120KB` |
+| `📐 A+图≤500KB` | `📐 尺寸不变 ≤500KB` |
+| `📐 A+图≤900KB` | `📐 尺寸不变 ≤900KB` |
+
+**新增（1 个）**：`📐 尺寸不变 ≤200KB` —— 尺寸/比例/边长一个像素不动，只降质量。预设总数 7 → 10。
+
+**改名对用户透明**：`PRESET_RENAMES` 迁移表在 `_load_settings()` 里**先迁移、再校验**，老配置里的旧名自动搬到新名，不会被判非法后静默回落到「推荐压缩」。`--preset` 按插入顺序编号，新档追加在 `PRESETS` **末尾**，老脚本里的 `--preset 1`–`9` 语义完全不变。
+
+**按钮不再截断**：去掉写死的 `width=15`，改 `sticky="ew"` + `columnconfigure(..., uniform="preset")`，每行按本页最长名字撑开，并新增独立图例行。
+
+**回归（全部实跑通过）**：统一入口 16/16 全绿（67.9s，退出码 0）、预设改名 134/134、打包 exe 预设 93/93、exe 35/35、输出模式 8/8、防线审计 A–E 全 PASS。真机截图验收按钮三行 4/3/3 完整无截断。
+
+**顺手修掉的测试隔离事故**：`_t_run_all.py` 原本只重定向 `LOCALAPPDATA`（管得住 `settings.json` / `quick.json`），但**注册表不受环境变量影响** —— `_t_v9_win2.py` 的 `--install --quiet` 把右键菜单写到了隔离临时目录且从不还原，跑完用户右键就失效。现已加注册表快照/还原 + 逐测试归因打印真凶，并给会真写 HKCU 的测试自身加 `atexit` 护栏。
 
 ### v11.1 — 右键真的修好了 + 会查重装了（2026-10）
 
@@ -411,7 +485,7 @@ v4 = Tkinter 旧版基线（不能拖图）。v3 之前是命令行版 + 拖 BAT
 ## 已知小坑（不影响功能）
 
 - **没做代码签名** → 第一次双击 Windows SmartScreen 会拦一下，点「更多信息 → 仍要运行」即可。
-- **全局自定义快捷键暂未提供**，v11.1 也没有做。v11.1 走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面与开始菜单图标这五条路，都是官方支持的机制。做成「任意界面按一个全局热键就压缩当前选中的图」需要常驻进程 + 读 Explorer 选中项 + 托盘 + 开机自启，成本和风险都不小，属于将来版本的范围。
+- **全局自定义快捷键暂未提供**，v11.2 也没有做。目前走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面与开始菜单图标这五条路，都是官方支持的机制。做成「任意界面按一个全局热键就压缩当前选中的图」需要常驻进程 + 读 Explorer 选中项 + 托盘 + 开机自启，成本和风险都不小，属于将来版本的范围。
 - **`install.bat` 必须是纯 ASCII**。这是踩过坑之后定的：cmd 按活动控制台码页解析 `.bat`，中文脚本在码页不匹配时会被切乱码。中文提示一律由 exe 弹窗。
 - **目标体积 + PNG 常常压不动**。PNG 是无损格式，对它降质量本来就没意义。真要小就得转 JPG/WebP——在设置里把输出格式改成 WebP 就有了。
 
@@ -425,7 +499,9 @@ MIT — 完整文本见 [LICENSE](LICENSE)。
 
 ## English
 
-PicShrink (图瘦身 / "slim-down pictures") is a fully-local image compressor for Windows. v11.1 fixes the remaining right-click bugs. The folder context menu was dead: its command line used `%*` (the multi-select token), but a folder has no "list of selected files", so `%*` expanded to nothing and the app received zero arguments. It now uses `%V`, the folder's own full path, so right-clicking a folder recursively compresses it. On launch, the app now writes the real exe path, raw argv and parsed arguments to `%TEMP%\picshrink_v11.log`, so a failure is diagnosable instead of guesswork. Silent installs (`--install --quiet`) no longer pop a modal dialog when a previous install is found; findings go to the log and to `%LOCALAPPDATA%\图瘦身\install-warnings.txt`, while manual installs still warn on screen. Nothing is ever deleted automatically.
+PicShrink (图瘦身 / "slim-down pictures") is a fully-local image compressor for Windows. v11.2 renames four presets so the name states whether your pixels get resized, and adds one more size target, bringing the total from 7 to 10. `📦 主图≤200KB` became `📦 限边长1280 ≤200KB` and `📦 主图≤120KB` became `📦 限边长1100 ≤120KB` — both shrink the long edge. `📐 A+图≤500KB` / `📐 A+图≤900KB` became `📐 尺寸不变 ≤500KB` / `📐 尺寸不变 ≤900KB`, which touch no pixel at all: dimensions, aspect ratio and edge length are untouched and only the quality is lowered. The new `📐 尺寸不变 ≤200KB` works the same way. This matters for Amazon A+ modules, where pixel dimensions are a hard requirement (`970×300`, `1400×300`, `1920×600`, …) — shrinking breaks compliance, and lowering quality alone is enough to hit a size budget. Renaming is transparent: stored presets are migrated before validation, so a saved preset never silently reverts to the default. The new preset is appended at the end of the table, so existing `--preset 1`–`9` numbering is unchanged.
+
+v11.1 fixed the remaining right-click bugs. The folder context menu was dead: its command line used `%*` (the multi-select token), but a folder has no "list of selected files", so `%*` expanded to nothing and the app received zero arguments. It now uses `%V`, the folder's own full path, so right-clicking a folder recursively compresses it. On launch, the app now writes the real exe path, raw argv and parsed arguments to `%TEMP%\picshrink_v11.log`, so a failure is diagnosable instead of guesswork. Silent installs (`--install --quiet`) no longer pop a modal dialog when a previous install is found; findings go to the log and to `%LOCALAPPDATA%\图瘦身\install-warnings.txt`, while manual installs still warn on screen. Nothing is ever deleted automatically.
 
 v11 adds persistent settings and reversible backups: the right-click entry now honours a saved default preset, default output format (keep original / JPG / PNG / WebP) and one of three output locations (export next to the original with a `_compressed` suffix, export flat into a fixed folder, or overwrite the original with automatic backup). Backups are browsable and restorable from the GUI, and even a restore is itself reversible.
 

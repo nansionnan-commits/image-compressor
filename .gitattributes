@@ -1,0 +1,23 @@
+# 这台机器的 git 是 core.autocrlf=true, 而本项目对换行符有硬要求:
+#   - 源码 .py 必须 LF (CRLF=0), 混进 CRLF 会污染 diff 和逐行比对
+#   - install.bat / uninstall.bat 必须 CRLF, 纯 ASCII, 记事本和旧 cmd 才认
+# 没有这份文件时, git 下一次 checkout 就会把源码写成 CRLF。
+* text=auto
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.bat   text eol=crlf
+# 这两个文件自己也得管住, 否则在 core.autocrlf=true 的机器上
+# checkout 后会变 CRLF, 每次 git 操作都刷一条 "LF will be replaced" 警告
+.gitattributes     text eol=lf
+.gitignore         text eol=lf
+# setup.iss 也钉成 LF: 它由 _mk_iss.py 生成 (纯 LF), 若交给 core.autocrlf
+# 处理, checkout 后会变 CRLF, 与生成器输出对不上。eol=lf 只固定工作区,
+# Git 存储内容不变, 所以不会造成额外 diff —— 改完仍只有版本号那几行。
+setup.iss text eol=lf
+
+# 二进制: 明确禁止换行转换, 免得 CRLF<->LF 把文件改坏
+*.exe   binary
+*.zip   binary
+*.ico   binary
+*.png   binary
