@@ -421,6 +421,69 @@ Windows 10 / 11 64 位。**不需要装 Python。**
 - PNG 这类格式的「质量」参数对压缩率影响有限。如果一张 PNG 压完反而更大，程序会自动**保留原图**不覆盖它 —— 宁可不动，也不给你一个更大的文件。
 """
 
+NOTES_V11_3 = """## 图瘦身 (PicShrink) v11.3 — 右键多了一条「加入压缩队列」
+
+完全跑在本机的 Windows 图片压缩工具。**不上传、不联网**。
+
+| 资产 | 说明 |
+|---|---|
+| `PicShrink-Setup-v11.3.exe` | **向导式安装包（推荐）**，约 20.3 MB |
+| `PicShrink-v11.3-portable.zip` | 便携版，解压即用（含 install.bat / uninstall.bat）|
+| `PicShrink.exe` | 单文件主程序，免安装直接双击 |
+| `app.ico` | 品牌图标 |
+
+### 怎么装
+
+双击 `PicShrink-Setup-v11.3.exe`，一路点「下一步」到「安装」。
+
+- 安装位置 `%LOCALAPPDATA%\\图瘦身\\`，**不需要管理员权限**
+- 设置 → 应用 → 找到「图瘦身 (PicShrink) v11.3」→ **可点击的真卸载器**
+- 安装只写 `HKCU`，不影响别的 Windows 账号
+
+### v11.3 改了什么
+
+**① 右键从「一条路」变成「两条路」**
+
+以前右键只有一条：点下去直接开进度窗开压。压之前你没法改预设、没法挑输出位置、也没法看这次到底要压哪些文件 —— 主界面里那些能力，右键一条都用不上。
+
+| 菜单项 | 图片右键 | 文件夹右键 | 行为 |
+|---|---|---|---|
+| 立即压缩 | 可多选 | 递归 | 点完直接压，跟以前一样，不弹主窗口 |
+| 加入压缩队列 | 可多选 | 递归 | 路径投进**已经开着**的主窗口待处理列表，窗口自动弹到最前 |
+
+**② 「加入压缩队列」不会多开窗口**
+
+主窗口开着 → 投递进去然后这个进程直接退出；没开着 → 才新开一个主窗口。
+
+技术上没上 ctypes / 命名管道 / 托盘常驻，用的是命名互斥体 + `%TEMP%\\PicShrink\\inbox\\` 目录：主窗口每 400ms 收一次，写入时先落 `.tmp` 再原子改名成 `.drop`，所以主窗口永远不会读到半截文件。主窗口退出前遗留的投递（超过 60 秒）会自动清掉。
+
+**③ 顺手修掉的升级坑**
+
+- **升级后右键出现两套菜单**：菜单在注册表里的键名以前直接用中文显示名，一改显示名就留下一个删不掉的孤儿键。现在键名固定成 ASCII（`PicShrinkQuick` / `PicShrinkQueue`），显示名随便改都不会产生孤儿项；安装和卸载都会主动清掉历史的中文键。
+- **旧版留下的 `MultiSelectModel` 会害多选失效**：它在资源管理器里会把命令行截得很短，导致路径传不进来。安装时主动删掉这个值。
+
+> 从 v11.2 升级不需要手动清理注册表，四个新菜单项会自动接管，旧的中文键会被删掉。
+
+### v11.2 / v11.1 的功能全部保留
+
+- 10 个预设，名字直接回答「到底动没动我的像素」：带「📦 限边长」的会缩，带「📐 尺寸不变」的一个像素都不动
+- 文件夹右键用 `%V`，能递归压整个目录
+- 报错信息能用了：一个路径都没收到会直说「菜单项注册坏了，重装一次」
+- 每次启动把真实参数写进 `%TEMP%\\picshrink_v11.log`，出问题有据可查
+- 无损预设像素零差异，备份可随时还原，原图永不覆盖
+
+### 前提
+
+Windows 10 / 11 64 位。**不需要装 Python。**
+
+⚠️ exe 没做代码签名，第一次双击可能弹 SmartScreen，点「更多信息 → 仍要运行」即可。
+
+### 已知限制
+
+- **全局自定义快捷键暂未提供**。目前走的是资源管理器右键 / 文件夹右键 / SendTo / 桌面与开始菜单图标这五条路，都是官方支持的机制。
+- PNG 这类格式的「质量」参数对压缩率影响有限。如果一张 PNG 压完反而更大，程序会自动**保留原图**不覆盖它 —— 宁可不动，也不给你一个更大的文件。
+"""
+
 DESCRIPTION = ("Windows 图片压缩工具：拖进去就压，原图永不覆盖，"
                "无损预设像素零差异，多选右键一次压完。纯本地运行，不上传、不联网。")
 
@@ -431,53 +494,34 @@ TOPICS = ["python", "image-compression", "image-optimization",
 
 def main() -> None:
     print("=== 1) Release ===")
-    # v9 / v10 / v11 / v11.1 的 Release 页面一律不再动 ——
+    # v9 / v10 / v11 / v11.1 / v11.2 的 Release 页面一律不再动 ——
     # 它们都已经发完了, 回炉会出事: dist/PicShrink.exe 是各版本共用的
     # 文件名, 每次跑都会删旧传新, 结果 v11 页面上的 PicShrink.exe 被换成
     # 新版的 exe, 而同一页的安装器还是 v11, 用户下到的单文件版和安装版
     # 对不上版本. 历史版本的页面就该原样冻结.
     #
-    # v11.2 是新增功能 (4 个预设改名 + 新增 200KB 档), 语义上是 minor bump,
-    # 单独发一个新页面, 不碰 v11.1.
-    v112_assets = [BASE / "_setup_out/PicShrink-Setup-v11.2.exe",
-                   BASE / "dist/PicShrink-v11.2-portable.zip",
+    # v11.3 是新增功能 (右键分「立即压缩」/「加入压缩队列」), minor bump,
+    # 单独发一个新页面, 不碰 v11.2.
+    v113_assets = [BASE / "_setup_out/PicShrink-Setup-v11.3.exe",
+                   BASE / "dist/PicShrink-v11.3-portable.zip",
                    BASE / "dist/PicShrink.exe",
                    BASE / "app.ico"]
 
-    print(f"\n[v11.2]")
+    print(f"\n[v11.3]")
     rid, upload_base = ensure_release(
-        "v11.2", "v11.2 — 预设名字终于说人话了", NOTES_V11_2)
-    for p in v112_assets:
+        "v11.3", "v11.3 — 右键多了一条「加入压缩队列」", NOTES_V11_3)
+    for p in v113_assets:
         sync_asset(rid, upload_base, p)
 
-    print("\n=== 2) 仓库 description ===")
-    st, data = api("PATCH", API, {"description": DESCRIPTION})
-    print(f"  HTTP {st}: {data.get('description') if isinstance(data, dict) else data}")
+    # description / topics / milestone 这三样是仓库级一次性家务, v11.2 那轮
+    # 已经做完并且是幂等的, 不属于"发一个新版本"的范围, 所以本轮不再重跑.
+    # 真要再改, 单独改这里并跑一次即可.
 
-    print("\n=== 3) 仓库 topics ===")
-    st, data = api("PUT", f"{API}/topics",
-                   {"names": TOPICS}, )
-    if st in (200, 422):
-        # 422 通常是已经一样, 不算失败
-        st2, cur = api("GET", f"{API}/topics")
-        print(f"  当前 topics: {(cur or {}).get('names')}")
-    else:
-        print(f"  HTTP {st}: {data}")
-
-    print("\n=== 4) 删诊断 milestone ===")
-    st, data = api("GET", f"{API}/milestones?state=all")
-    for m in (data or []):
-        n = m["number"]
-        st2, d2 = api("DELETE", f"{API}/milestones/{n}")
-        print(f"  #{n} {m['title']}: HTTP {st2}")
-
-    print("\n=== 5) 收尾核对 ===")
+    print("\n=== 2) 收尾核对 ===")
     st, data = api("GET", f"{API}/releases?per_page=20")
     for r in (data or []):
         print(f"  {r['tag_name']:<6} {r['name']}  "
               f"({len(r['assets'])} 个资产, draft={r['draft']})")
-    st, data = api("GET", f"{API}/milestones?state=all")
-    print(f"  剩余 milestone: {[(m['number'], m['title']) for m in (data or [])]}")
 
 
 if __name__ == "__main__":
