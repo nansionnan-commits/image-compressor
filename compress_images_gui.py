@@ -957,6 +957,32 @@ class App:
         elif self.files:
             self.status.config(text=f"已选 {len(self.files)} 张图 (拖入无新文件)")
 
+    def _raise_to_front(self):
+        """把主窗口顶到最前面。右键加了图, 用户得马上看见。"""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+            # Windows 上光靠 focus_force 常常抢不到前台, 要 topmost 闪一下
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            _v9_log("[inbox] 置前失败\n" + traceback.format_exc())
+
+    def _poll_inbox(self):
+        """收右键"加入压缩队列"投递过来的路径, 然后把自己排上下一轮。"""
+        try:
+            got = _v9_drain_inbox()
+            if got:
+                paths = _v9_expand(got)
+                if paths:
+                    self._add_paths(paths)
+                    self._raise_to_front()
+        except Exception:
+            # 轮询里任何异常都必须吞掉, 否则 Tk 的 after 链断掉,
+            # 右键投递就从此静默失效 —— 正好是这个功能最不能出的错。
+            _v9_log("[inbox] 轮询异常\n" + traceback.format_exc())
+        self.root.after(V9_INBOX_POLL_MS, self._poll_inbox)
+
     def _on_drop(self, event):
         """tkinterdnd2 <<Drop>> 回调.
 
@@ -1063,7 +1089,7 @@ class App:
 
         # --- 1. 右键菜单默认预设 ---
         ttk.Label(pad, text="右键菜单默认压缩到", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(pad, text="在资源管理器里右键选图 →「用图瘦身处理」时用的档位",
+        ttk.Label(pad, text="在资源管理器里右键选图 →「立即压缩」时用的档位",
                   font=f, foreground="#666").pack(anchor="w", pady=(0, 4))
         preset_names = list(PRESETS.keys())
         pv = tk.StringVar(value=cfg["preset"] if cfg["preset"] in preset_names
@@ -2226,7 +2252,7 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
             "没找到可处理的图片。\n\n"
             + why + "\n\n"
             "可以这样用:\n"
-            "  · 选中图片右键 → 用图瘦身处理\n"
+            "  · 选中图片右键 → 立即压缩 (压完就走) / 加入压缩队列 (进主窗口)\n"
             "  · 选中文件夹 (自动递归所有图片)\n"
             "  · 命令行传通配符, 例如 图瘦身.exe \"D:\\图\\*.jpg\"\n\n"
             "支持的格式: " + ", ".join(sorted(SUPPORTED)),
@@ -2430,8 +2456,23 @@ def _v9_show_presets(notify: bool) -> None:
 
 V9_APP_TITLE = "图瘦身 (PicShrink) v11"
 V9_FOLDER_NAME = "图瘦身"
-V9_MENU_NAME = "用图瘦身处理"
-V9_MENU_NAME_DIR = "用图瘦身压缩这个文件夹"
+
+# 右键现在是两条并排的路, 名字必须一眼能分开, 否则用户只能挨个试:
+#   立即压缩      → 点完直接开压, 用设置里存的默认预设
+#   加入压缩队列  → 装进主窗口, 能看清单、能改预设、再点"开始压缩"
+#
+# 注册表键名一律用 ASCII (PicShrinkQuick / PicShrinkQueue), 跟菜单显示名解耦。
+# v9~v11.2 那次改名就是因为键名跟着显示名一起改, 老用户升级后新旧两项会同时
+# 出现在菜单里 —— 显示名以后可以随便改, 键名不动就永远不会再有孤儿项。
+V9_MENU_KEY_QUICK = "PicShrinkQuick"
+V9_MENU_KEY_QUEUE = "PicShrinkQueue"
+# v9~v11.2 用过的中文键名。安装/卸载时都要主动删, 不能指望覆盖。
+V9_MENU_LEGACY_KEYS = ("用图瘦身处理",)
+
+V9_MENU_NAME = "立即压缩"
+V9_MENU_NAME_DIR = "立即压缩这个文件夹"
+V9_QUEUE_MENU_NAME = "加入压缩队列"
+V9_QUEUE_MENU_NAME_DIR = "加入压缩队列这个文件夹"
 V9_SHORTCUT_NAME = "图瘦身.lnk"
 
 # FOLDERID_Desktop —— 问 Windows 要真实桌面路径。
@@ -2672,6 +2713,48 @@ def _v9_find_stale_installs(dest: Path) -> list[tuple[str, str]]:
     return found
 
 
+def _v9_write_verb(shell_path: str, key: str, display: str,
+                   icon: str, cmd: str) -> None:
+    """写一个右键菜单项。shell_path 形如 Software\\Classes\\*\\shell。"""
+    import winreg
+    k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                           shell_path + "\\" + key, 0, winreg.KEY_ALL_ACCESS)
+    try:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, display)
+        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
+        # 升级必须主动删掉旧的 MultiSelectModel。SetValueEx 只写不删,
+        # 老值留在那儿等于这次修复根本没生效 —— 这是最容易漏的一步。
+        try:
+            winreg.DeleteValue(k, "MultiSelectModel")
+        except FileNotFoundError:
+            pass
+        c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
+        try:
+            winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
+        finally:
+            winreg.CloseKey(c)
+    finally:
+        winreg.CloseKey(k)
+
+
+def _v9_drop_legacy_menu_keys() -> list[str]:
+    """删掉历史版本用过的中文键名。
+
+    不删的话, 从 v11.2 升上来的用户右键会同时看到「用图瘦身处理」和新的
+    「立即压缩」/「加入压缩队列」三个图瘦身项 —— 看着像装重了。
+    这正是当年 MultiSelectModel 残留的同一类坑, 别再踩第二次。
+    """
+    import winreg
+    gone = []
+    for shell_path in ("Software\\Classes\\*\\shell",
+                       "Software\\Classes\\Directory\\shell"):
+        for old in V9_MENU_LEGACY_KEYS:
+            if _v9_del_key(winreg.HKEY_CURRENT_USER, shell_path + "\\" + old):
+                _v9_log(f"[install] 已删除旧菜单项: {shell_path}\\{old}")
+                gone.append(shell_path + "\\" + old)
+    return gone
+
+
 def v9_install(quiet: bool = False) -> int:
     """装上右键菜单 / 发送到 / 桌面快捷方式. 返回退出码."""
     import shutil
@@ -2728,36 +2811,33 @@ def v9_install(quiet: bool = False) -> int:
     # 没有"一批文件"可言, %* 会展开成空字符串 (v11 的实测教训)。
     # %V 才是当前文件夹的完整路径。
     cmd_dir = f'"{dst_exe}" "%V"'
+    # 加入队列那条只是多带一个 --gui, 路径占位符的规矩完全一样:
+    # 文件 %1 / 文件夹 %V, 同样不写 MultiSelectModel。
+    cmd_q = f'"{dst_exe}" --gui "%1"'
+    cmd_dir_q = f'"{dst_exe}" --gui "%V"'
     try:
-        # 2) 图片右键菜单
-        k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
-                               "Software\\Classes\\*\\shell\\" + V9_MENU_NAME,
-                               0, winreg.KEY_ALL_ACCESS)
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME)
-        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
-        # 升级必须主动删掉旧的 MultiSelectModel。SetValueEx 只写不删,
-        # 老值留在那儿等于这次修复根本没生效 —— 这是最容易漏的一步。
-        try:
-            winreg.DeleteValue(k, "MultiSelectModel")
-        except FileNotFoundError:
-            pass
-        c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
-        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd)
-        winreg.CloseKey(c)
-        winreg.CloseKey(k)
-        _v9_install_step(2, 5, "图片右键菜单 (支持多选)", lines)
+        # 2) 图片右键菜单: 立即压缩 + 加入压缩队列
+        _v9_write_verb("Software\\Classes\\*\\shell", V9_MENU_KEY_QUICK,
+                       V9_MENU_NAME, icon, cmd)
+        _v9_write_verb("Software\\Classes\\*\\shell", V9_MENU_KEY_QUEUE,
+                       V9_QUEUE_MENU_NAME, icon, cmd_q)
+        _v9_install_step(2, 5,
+                         f"图片右键菜单: 「{V9_MENU_NAME}」「{V9_QUEUE_MENU_NAME}」(均支持多选)",
+                         lines)
 
-        # 3) 文件夹右键菜单
-        k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
-                               "Software\\Classes\\Directory\\shell\\" + V9_MENU_NAME,
-                               0, winreg.KEY_ALL_ACCESS)
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, V9_MENU_NAME_DIR)
-        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
-        c = winreg.CreateKeyEx(k, "command", 0, winreg.KEY_ALL_ACCESS)
-        winreg.SetValueEx(c, "", 0, winreg.REG_SZ, cmd_dir)
-        winreg.CloseKey(c)
-        winreg.CloseKey(k)
-        _v9_install_step(3, 5, "文件夹右键菜单 (自动递归)", lines)
+        # 3) 文件夹右键菜单: 同上两条, 自动递归
+        _v9_write_verb("Software\\Classes\\Directory\\shell", V9_MENU_KEY_QUICK,
+                       V9_MENU_NAME_DIR, icon, cmd_dir)
+        _v9_write_verb("Software\\Classes\\Directory\\shell", V9_MENU_KEY_QUEUE,
+                       V9_QUEUE_MENU_NAME_DIR, icon, cmd_dir_q)
+        _v9_install_step(3, 5,
+                         f"文件夹右键菜单: 「{V9_MENU_NAME_DIR}」「{V9_QUEUE_MENU_NAME_DIR}」",
+                         lines)
+
+        # 历史中文键名必须清掉, 否则菜单里会新旧并存
+        gone = _v9_drop_legacy_menu_keys()
+        if gone:
+            _v9_install_step(3, 5, f"已清理旧菜单项 {len(gone)} 处", lines)
     except Exception as e:
         _v9_log(f"[install] 注册表失败: {e}")
         if not quiet:
@@ -2823,8 +2903,9 @@ def v9_install(quiet: bool = False) -> int:
         _v9_box(V9_APP_TITLE,
                 f"安装完成!\n\n{summary}\n\n"
                 "用法:\n"
-                f"  1. 选中图片右键 -> {V9_MENU_NAME} (可多选)\n"
-                f"  2. 右键文件夹 -> {V9_MENU_NAME_DIR}\n"
+                f"  1. 选中图片右键 -> {V9_MENU_NAME} (压完就走) 或 "
+                f"{V9_QUEUE_MENU_NAME} (进主窗口队列, 可再挑)\n"
+                f"  2. 右键文件夹 -> {V9_MENU_NAME_DIR} / {V9_QUEUE_MENU_NAME_DIR}\n"
                 "  3. 右键 -> 发送到 -> 图瘦身\n"
                 "  4. 双击桌面 图瘦身 -> 完整界面\n\n"
                 "右键菜单没出现就按 F5 或重开文件夹窗口。\n"
@@ -2861,11 +2942,16 @@ def v9_uninstall(quiet: bool = False) -> int:
 
     lines: list[str] = []
     removed = 0
-    for path in ("Software\\Classes\\*\\shell\\" + V9_MENU_NAME,
-                 "Software\\Classes\\Directory\\shell\\" + V9_MENU_NAME):
-        ok = _v9_del_key(winreg.HKEY_CURRENT_USER, path)
-        lines.append(("已移除" if ok else "本来就没有") + ": " + path.split("\\")[-1])
-        removed += int(ok)
+    # 现在的键 + 历史遗留的中文键都要删, 漏一个就会在菜单里留个点不掉的残影。
+    for ctx_label, shell_path in (("图片", "Software\\Classes\\*\\shell"),
+                                  ("文件夹", "Software\\Classes\\Directory\\shell")):
+        for key in (V9_MENU_KEY_QUICK, V9_MENU_KEY_QUEUE) + V9_MENU_LEGACY_KEYS:
+            ok = _v9_del_key(winreg.HKEY_CURRENT_USER, shell_path + "\\" + key)
+            if ok:
+                removed += 1
+                lines.append(f"已移除{ctx_label}右键菜单: {key}")
+    if not removed:
+        lines.append("右键菜单: 本来就没有")
 
     sendto = Path(os.environ.get("APPDATA", str(Path.home()))) / \
         "Microsoft/Windows/SendTo"
@@ -2917,7 +3003,141 @@ def v9_uninstall(quiet: bool = False) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 单实例: 右键"加入压缩队列"时, 主窗口若已经开着, 绝不能再弹第二个窗口。
+#
+# 不做这一步的后果很具体: 右键 5 次 = 5 个主窗口, 队列被劈成 5 份, 每份都
+# 缺图, 用户看到的是"这软件坏了", 而且完全猜不到原因。
+#
+# 做法: 命名互斥体判断主窗口在不在。在 → 把路径写进收件箱目录后本进程直接退出,
+# 由主窗口每 400ms 轮询一次收件箱。
+#
+# 为什么不用 WM_COPYDATA / 命名管道: 那两条路要把 ctypes 回调接进 Tk 事件循环,
+# 跨线程碰 Tk 是这个项目反复栽跟头的类型。收件箱方案是纯 Python、逻辑全在主
+# 进程内、可以脱离 GUI 单测, 出问题也好定位。
+# ---------------------------------------------------------------------------
+V9_MUTEX_NAME = "Local\\PicShrink_Main_v1"
+# 测试钩子: 指到临时目录, 免得跑测试往真机 %TEMP% 里丢收件箱文件。
+V9_INBOX_ENV = "PIC SHRINK_INBOX"
+V9_INBOX_POLL_MS = 400
+
+_v9_main_mutex = None
+
+
+def _v9_inbox_dir() -> Path:
+    override = os.environ.get(V9_INBOX_ENV)
+    if override:
+        return Path(override)
+    tmp = os.environ.get("TEMP") or os.environ.get("TMP") or str(Path.home())
+    return Path(tmp) / "PicShrink" / "inbox"
+
+
+def _v9_claim_main_instance() -> bool:
+    """抢占主实例身份。True = 还没人在跑, 该由我开主窗口。
+
+    用 WaitForSingleObject 而不是 get_last_error(): CreateMutexW 在对象已存在时
+    照样返回句柄, 只有"能不能立刻拿到所有权"才区分得开主次。
+    """
+    global _v9_main_mutex
+    if os.name != "nt":
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        k32.WaitForSingleObject.restype = ctypes.c_ulong
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        h = k32.CreateMutexW(None, True, V9_MUTEX_NAME)
+        if not h:
+            _v9_log("[single] CreateMutexW 失败, 按无主实例处理")
+            return True
+        # 句柄必须一直持有, 提前被 GC 掉就等于悄悄放开了所有权,
+        # 第二个进程会以为没人在跑, 于是又开一个窗口 —— 正是要避免的那个坑。
+        _v9_main_mutex = h
+        owned = k32.WaitForSingleObject(h, 0) == 0x00000000  # WAIT_OBJECT_0
+        _v9_log(f"[single] mutex={V9_MUTEX_NAME} 拿到主实例={owned}")
+        return bool(owned)
+    except Exception as e:
+        _v9_log(f"[single] 互斥体异常 {e}, 按无主实例处理")
+        return True
+
+
+def _v9_drop_to_inbox(paths: list[str]) -> bool:
+    """把路径交给已经在跑的主窗口, 然后本进程就该退出了。"""
+    d = _v9_inbox_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _v9_log(f"[inbox] 建目录失败: {e}")
+        return False
+    # 先写 .tmp 再原子改名: 主窗口轮询时不可能读到写了一半的文件。
+    stamp = f"{os.getpid()}.{int(time.time() * 1000)}"
+    tmp = d / (stamp + ".tmp")
+    dst = d / (stamp + ".drop")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            for p in paths:
+                f.write(p + "\n")
+        os.replace(tmp, dst)
+    except OSError as e:
+        _v9_log(f"[inbox] 写失败: {e}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    _v9_log(f"[inbox] 已投递 {len(paths)} 条 -> {dst}")
+    return True
+
+
+def _v9_drain_inbox() -> list[str]:
+    """主窗口定时调, 收走所有已就绪的 .drop, 返回路径列表。"""
+    d = _v9_inbox_dir()
+    if not d.is_dir():
+        return []
+    now = time.time()
+    got: list[str] = []
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return []
+    for f in entries:
+        try:
+            age = now - f.stat().st_mtime
+        except OSError:
+            continue
+        if f.suffix == ".tmp":
+            # .tmp 是写一半的中间产物, 正常会被改名成 .drop。
+            # 超过 60s 还在的说明上一个实例中途崩了, 清理掉免得攒垃圾。
+            if age > 60:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            continue
+        if f.suffix != ".drop":
+            continue
+        try:
+            raw = f.read_text(encoding="utf-8")
+        except OSError:
+            # 读不到就先不删, 下轮轮询再试 —— 删了就真把数据丢了。
+            continue
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        for line in raw.splitlines():
+            s = line.strip()
+            if s:
+                got.append(s)
+    if got:
+        _v9_log(f"[inbox] 收到 {len(got)} 条")
+    return got
+
+
 def main(preload: list[Path] | None = None):
+    # 双击 exe 也要占住主实例身份, 否则用户连续双击两次就会开出两个窗口。
+    _v9_claim_main_instance()
     # v6: 用 tkinterdnd2 的 Tk 替换原生 tk.Tk, 才能让 listbox 接 OS 文件拖拽
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     try:
@@ -2929,6 +3149,9 @@ def main(preload: list[Path] | None = None):
     except Exception:
         pass
     app = App(root)
+    # 右键"加入压缩队列"靠这条 after 链接收路径。首次调用顺便把上一次崩溃
+    # 遗留的 .drop 也收走, 避免用户白点一次右键。
+    app._poll_inbox()
     # --gui 入口: 把命令行带来的图预载进待压缩列表, 让用户自己点"开始压缩"
     if preload:
         try:
@@ -2970,6 +3193,13 @@ if __name__ == "__main__":
         _pre = _v9_expand(_paths)
         if not _pre:
             _pre = [Path(x) for x in _paths if Path(x.strip().strip('"')).exists()]
+        # 主窗口已经开着 → 投递过去就退出, 绝不能再弹第二个窗口。
+        # 不做这一步, 用户右键 5 次就看到 5 个窗口, 队列被劈成 5 份。
+        if _pre and not _v9_claim_main_instance():
+            if _v9_drop_to_inbox([str(p) for p in _pre]):
+                _v9_log("[single] 已投递到运行中的主窗口, 本进程退出")
+                sys.exit(0)
+            # 投递失败只能退回"自己开一个": 宁可多一个窗口, 也不能让右键彻底失灵。
         main(preload=_pre)
     else:
         sys.exit(_v9_quick(_paths, _opts))        # 右键 / SendTo / 拖到图标

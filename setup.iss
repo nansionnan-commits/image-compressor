@@ -1,4 +1,4 @@
-﻿; 图瘦身 (PicShrink) v11.2 — Inno Setup 安装器脚本
+﻿; 图瘦身 (PicShrink) v11.3 — Inno Setup 安装器脚本
 ; 设计原则:
 ;   Inno 只负责 文件 / 图标 / 开始菜单 / 卸载器 登记
 ;   资源管理器右键 / 发送到 / 桌面快捷方式 仍由 PicShrink.exe --install 负责
@@ -6,8 +6,8 @@
 
 #define AppName "图瘦身"
 #define AppNameEn "PicShrink"
-#define AppVer "11.2.0"
-#define AppVerShort "v11.2"
+#define AppVer "11.3.0"
+#define AppVerShort "v11.3"
 #define AppPublisher "图瘦身 (PicShrink) contributors"
 #define AppExeName "PicShrink.exe"
 
@@ -17,7 +17,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppVerName={#AppName} {#AppNameEn} {#AppVerShort}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=11.2.0.0
+VersionInfoVersion=11.3.0.0
 
 ; 与 v9_install() 的 _v9_install_dir() 完全一致, 避免出现两份安装目录
 ; UsePreviousAppDir=no 是 v11 实测踩出来的坑:
