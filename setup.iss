@@ -1,13 +1,20 @@
-﻿; 图瘦身 (PicShrink) v11.3 — Inno Setup 安装器脚本
+﻿; 图瘦身 (PicShrink) v11.4 — Inno Setup 安装器脚本
 ; 设计原则:
 ;   Inno 只负责 文件 / 图标 / 开始菜单 / 卸载器 登记
 ;   资源管理器右键 / 发送到 / 桌面快捷方式 仍由 PicShrink.exe --install 负责
 ;   (那段逻辑已过多轮安装 / E2E 回归, 不重复实现)
+;
+; ⚠ 用户自定义预设不在 {app} 里, 它在 %APPDATA%\图瘦身\presets.json。
+;   这是**故意的**: {app} = %LOCALAPPDATA%\图瘦身 就是安装目录,
+;   卸载时这里的文件会被删掉, 用户在卸载时点"是"的话连整个目录一起没。
+;   用户的要求是"卸载之后再装新版本, 预设还在", 所以预设必须存在
+;   安装器和卸载器永远碰不到的地方 —— AppData\Roaming 正好满足。
+;   别把预设挪回 {app}, 也不要在 [UninstallDelete] 里加任何东西。
 
 #define AppName "图瘦身"
 #define AppNameEn "PicShrink"
-#define AppVer "11.3.0"
-#define AppVerShort "v11.3"
+#define AppVer "11.4.0"
+#define AppVerShort "v11.4"
 #define AppPublisher "图瘦身 (PicShrink) contributors"
 #define AppExeName "PicShrink.exe"
 
@@ -17,7 +24,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppVerName={#AppName} {#AppNameEn} {#AppVerShort}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=11.3.0.0
+VersionInfoVersion=11.4.0.0
 
 ; 与 v9_install() 的 _v9_install_dir() 完全一致, 避免出现两份安装目录
 ; UsePreviousAppDir=no 是 v11 实测踩出来的坑:

@@ -2,7 +2,7 @@
 图瘦身 (PicShrink) — 单文件 GUI 入口 (压缩引擎 + Tkinter + tkinterdnd2 OS 拖拽).
 
 品牌: 中文名「图瘦身」/ 英文名 PicShrink / exe 名「图瘦身.exe」.
-版本: v11 (透明 PNG 不再崩溃 + 多选右键 + 持久化设置 + 备份可还原).
+版本: v11.4 (用户自定义预设: 自己存档, 卸载重装都还在).
 
 核心能力 (相对早期 v3/v4):
   - 10 个预设 (按"画质损失程度"分层):
@@ -29,7 +29,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import wintypes
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # v6: 加 tkinterdnd2 接 OS 文件拖拽, 缺失就降级到按钮选文件
 try:
@@ -654,7 +654,13 @@ class App:
         self.root = root
         # 标题里的预设数量必须动态取 —— 写死过一次("7 预设"), 加了档位之后
         # 用户在标题栏看到的还是旧数字, 会以为预设没加上去。
-        root.title(f"图瘦身 v11 (拖图片/文件夹进窗口, {len(PRESETS)} 预设 + 按目标体积压)")
+        # 自定义预设的数量会变, 单独标出来, 让人一眼知道"我自己存了几个"。
+        _n_custom = len(load_custom_presets())
+        _title = (f"图瘦身 v11.4 (拖图片/文件夹进窗口, "
+                  f"{len(PRESETS)} 预设 + 按目标体积压)")
+        if _n_custom:
+            _title += f" · 我的预设 {_n_custom}"
+        root.title(_title)
         root.geometry("1000x880")
         # 窗口图标 (含任务栏图标). 兼容 PyInstaller 单文件 (sys._MEIPASS).
         try:
@@ -736,8 +742,24 @@ class App:
         self.preset_legend.pack(anchor="w", padx=4, pady=(0, 2))
 
         self.show_custom = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="显示自定义参数 (高级用户)",
-                        variable=self.show_custom, command=self._toggle_custom).pack(anchor="w", padx=4)
+        self.show_custom_cb = ttk.Checkbutton(left, text="显示自定义参数 (高级用户)",
+                                             variable=self.show_custom,
+                                             command=self._toggle_custom)
+        self.show_custom_cb.pack(anchor="w", padx=4)
+
+        # ===== v11.4: 我的自定义预设 =====
+        # 单独开一块, 不跟内置预设混在同一排按钮里:
+        #   内置档位是产品定的, 用户自己存的另起一块, 一眼分得清谁是谁;
+        #   内置按钮的行列是写死的(PRESET_ROWS), 插用户预设进去会把
+        #   那套布局和 --preset 序号一起搞坏。
+        # 一个自定义预设都没有的时候整块收起来, 不在主界面上留空框。
+        self.custom_preset_frame = ttk.LabelFrame(
+            left, text="★ 我的自定义预设 (自己存的, 卸载重装都在)", padding=6)
+        self.custom_preset_box = ttk.Frame(self.custom_preset_frame)
+        self.custom_preset_box.pack(fill="x")
+        self.custom_preset_hint = ttk.Label(self.custom_preset_frame, text="",
+                                             foreground="#888", wraplength=380)
+        self.custom_preset_hint.pack(anchor="w", padx=4, pady=(2, 0))
 
         self.custom_frame = ttk.LabelFrame(left, text="自定义 (留空 = 用预设)", padding=6)
         mf = ttk.Frame(self.custom_frame)
@@ -774,7 +796,7 @@ class App:
         ttk.Label(ff, text="输出格式:", width=10).pack(side="left")
         self.fmt_var = tk.StringVar(value="保持原格式 (推荐)")
         self.fmt_combo = ttk.Combobox(ff, textvariable=self.fmt_var, state="readonly",
-                                      values=["保持原格式 (推荐)", "JPG", "PNG"],
+                                      values=["保持原格式 (推荐)", "JPG", "PNG", "WebP"],
                                       width=18)
         self.fmt_combo.pack(side="left", padx=4)
         self.fmt_combo.bind("<<ComboboxSelected>>", lambda e: self._on_param_change())
@@ -792,6 +814,25 @@ class App:
         self.exif_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.custom_frame, text="保留拍摄参数 (EXIF)",
                         variable=self.exif_var, command=self._on_param_change).pack(anchor="w")
+
+        # ===== v11.4: 把眼前这套参数存成自己的预设 =====
+        # 位置放在高级参数区的最下面: 用户一定是先调完参数才想存,
+        # 存完就能在上面的「我的自定义预设」里一键复用。
+        ttk.Separator(self.custom_frame).pack(fill="x", pady=(10, 6))
+        savef = ttk.Frame(self.custom_frame)
+        savef.pack(fill="x")
+        ttk.Label(savef, text="预设名称:", width=10).pack(side="left")
+        self.custom_name_var = tk.StringVar(value="")
+        self.custom_name_entry = ttk.Entry(savef, textvariable=self.custom_name_var,
+                                            width=18, font=("Microsoft YaHei UI", 9))
+        self.custom_name_entry.pack(side="left", padx=4)
+        ttk.Button(savef, text="💾 保存为自定义预设",
+                   command=self.save_custom_preset).pack(side="left", padx=4)
+        ttk.Label(self.custom_frame,
+                  text=f"💡 存在 {_custom_presets_path()}\n"
+                       f"   不在安装目录里 —— 卸载重装、换版本都还在。",
+                  foreground="#888", wraplength=380, justify="left").pack(
+                      anchor="w", padx=4, pady=(4, 0))
 
         outf = ttk.Frame(left, padding=(0, 6, 0, 0))
         outf.pack(fill="x")
@@ -884,6 +925,7 @@ class App:
         # 用索引找避免中文名在 GBK 环境出问题
         default_preset = next((k for k in PRESETS if "推荐" in k), "⚡ 推荐压缩")
         self.apply_preset(default_preset, silent=True)
+        self._refresh_custom_presets()
         self._refresh_preview()
 
     def _toggle_custom(self):
@@ -901,13 +943,162 @@ class App:
     def _on_param_change(self, *_):
         self._refresh_preview()
 
+    # ------------------------------------------------------------
+    #  v11.4 自定义预设: 存 / 改名 / 删 / 应用
+    # ------------------------------------------------------------
+    def _refresh_custom_presets(self):
+        """重建「我的自定义预设」区. 增删改之后都要调一次."""
+        for w in self.custom_preset_box.winfo_children():
+            w.destroy()
+        items = load_custom_presets()
+        if not items:
+            # 一个都没有就把整块收起来, 别在主界面上留个空框
+            self.custom_preset_frame.pack_forget()
+            return
+        for name, spec in items.items():
+            row = ttk.Frame(self.custom_preset_box)
+            row.pack(fill="x", pady=1)
+            ttk.Button(row, text=name,
+                       command=lambda n=name: self.apply_preset(n)
+                       ).pack(side="left", fill="x", expand=True)
+            ttk.Button(row, text="✎", width=3,
+                       command=lambda n=name: self.rename_custom_preset(n)
+                       ).pack(side="left", padx=2)
+            ttk.Button(row, text="🗑", width=3,
+                       command=lambda n=name: self.delete_custom_preset(n)
+                       ).pack(side="left")
+        self.custom_preset_hint.config(
+            text=f"共 {len(items)} 个 · 存在 {_custom_presets_path()}")
+        # 必须带 before=show_custom_cb: pack 不带 before 就是"排到最后",
+        # 重新显示时会掉到窗口最底下, 位置跟第一次进来时不一样。
+        self.custom_preset_frame.pack(fill="x", pady=4,
+                                      before=self.show_custom_cb)
+
+    def save_custom_preset(self):
+        """把当前高级参数存成一个具名预设."""
+        name = str(self.custom_name_var.get() or "").strip()
+        if not name:
+            messagebox.showwarning("图瘦身", "先给这个预设起个名字。", parent=self.root)
+            return
+        if len(name) > 24:
+            messagebox.showwarning("图瘦身",
+                                   "名字太长了 (最多 24 个字), 换个短一点的。",
+                                   parent=self.root)
+            return
+        if name in PRESETS:
+            messagebox.showwarning(
+                "图瘦身",
+                f"“{name}” 是内置预设的名字, 不能覆盖。\n换个名字就行。",
+                parent=self.root)
+            return
+        items = load_custom_presets()
+        if name in items:
+            if not messagebox.askyesno(
+                    "图瘦身",
+                    f"已经有一个叫 “{name}” 的自定义预设了。\n"
+                    f"要用现在的参数覆盖它吗?",
+                    parent=self.root):
+                return
+        mode, quality, fmt, max_side, keep_exif, target_kb = self._resolve_params()
+        spec = {"mode": mode, "quality": quality, "target_kb": target_kb,
+                "format": fmt, "max_side": max_side, "keep_exif": keep_exif}
+        items[name] = spec
+        if not save_custom_presets(items):
+            messagebox.showerror(
+                "图瘦身",
+                f"预设保存失败, 权限不足?\n\n{_custom_presets_path()}",
+                parent=self.root)
+            return
+        self.custom_name_var.set("")
+        self._refresh_custom_presets()
+        self.apply_preset(name)
+        self._log(f">>> 已保存自定义预设: {name}  ({describe_preset(spec)})\n"
+                  f"    存在 {_custom_presets_path()}\n")
+
+    def rename_custom_preset(self, name: str):
+        items = load_custom_presets()
+        if name not in items:
+            return
+        new = simpledialog.askstring("重命名预设", "新名字:",
+                                      initialvalue=name, parent=self.root)
+        if not new:
+            return
+        new = str(new).strip()
+        if not new or new == name:
+            return
+        if len(new) > 24:
+            messagebox.showwarning("图瘦身", "名字太长了 (最多 24 个字)。",
+                                   parent=self.root)
+            return
+        if new in PRESETS:
+            messagebox.showwarning("图瘦身",
+                                   f"“{new}” 是内置预设的名字, 换个名字。",
+                                   parent=self.root)
+            return
+        if new in items:
+            messagebox.showwarning("图瘦身",
+                                   f"已经有叫 “{new}” 的了, 换个名字。",
+                                   parent=self.root)
+            return
+        items[new] = items.pop(name)
+        # ⚠ 顺序很重要: 必须**先**判断"设置里是不是指向它", 再改磁盘。
+        #   改完磁盘旧名就没了, 这时候 _load_settings() 读到旧名会判非法
+        #   并静默回落成默认档, 于是引用断了, 右键默认悄悄变回「推荐压缩」。
+        #   _raw_settings() 绕开回落, 拿到的才是真正的旧值。
+        raw = _raw_settings()
+        was_default = (raw.get("preset") == name)
+        if not save_custom_presets(items):
+            messagebox.showerror("图瘦身", "改名失败, 权限不足?", parent=self.root)
+            return
+        if was_default:
+            try:
+                s = _load_settings()
+                s["preset"] = new
+                _save_settings(s)
+                self._refresh_settings_hint()
+            except Exception:
+                pass
+        self._refresh_custom_presets()
+        self._log(f">>> 自定义预设已改名: {name} → {new}\n")
+
+    def delete_custom_preset(self, name: str):
+        if not messagebox.askyesno("图瘦身", f"删掉自定义预设 “{name}”?",
+                                   parent=self.root):
+            return
+        items = load_custom_presets()
+        if name not in items:
+            return
+        # 同上: 先用原始值判断, 再改磁盘
+        raw = _raw_settings()
+        was_default = (raw.get("preset") == name)
+        items.pop(name, None)
+        if not save_custom_presets(items):
+            messagebox.showerror("图瘦身", "删除失败, 权限不足?", parent=self.root)
+            return
+        # 正好是右键默认预设的话, 退回内置默认, 不留一个指向空名字的引用
+        if was_default:
+            try:
+                s = _load_settings()
+                s["preset"] = V9_FALLBACK_PRESET
+                _save_settings(s)
+                self._refresh_settings_hint()
+            except Exception:
+                pass
+        self._refresh_custom_presets()
+        self._log(f">>> 已删除自定义预设: {name}\n")
+
     def apply_preset(self, name: str, silent: bool = False):
-        p = PRESETS[name]
+        # all_presets() = 内置 + 用户自定义。内置的 10 个是常量表,
+        # 自定义的在磁盘上, 所以这里必须走合并后的表。
+        p = all_presets().get(name)
+        if not p:
+            return
         self.mode_var.set(MODE_LABELS[p["mode"]])
         self.quality_var.set(p.get("quality", 85))
         self.q_label.config(text=str(self.quality_var.get()))
         fmt_label = {"keep": "保持原格式 (推荐)", "jpg": "JPG",
-                     "png": "PNG"}.get(p.get("format", "keep"), "保持原格式 (推荐)")
+                     "png": "PNG", "webp": "WebP"}.get(p.get("format", "keep"),
+                                                       "保持原格式 (推荐)")
         self.fmt_var.set(fmt_label)
         side_label = "原图" if p.get("max_side", 0) == 0 else str(p["max_side"])
         if side_label not in self.side_combo["values"]:
@@ -1091,7 +1282,8 @@ class App:
         ttk.Label(pad, text="右键菜单默认压缩到", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
         ttk.Label(pad, text="在资源管理器里右键选图 →「立即压缩」时用的档位",
                   font=f, foreground="#666").pack(anchor="w", pady=(0, 4))
-        preset_names = list(PRESETS.keys())
+        # 内置 10 个在前, 用户自定义的在后面 —— 下拉里能直接选自己存的档位
+        preset_names = list(PRESETS.keys()) + list(load_custom_presets().keys())
         pv = tk.StringVar(value=cfg["preset"] if cfg["preset"] in preset_names
                           else V9_FALLBACK_PRESET)
         ttk.Combobox(pad, textvariable=pv, values=preset_names,
@@ -1100,9 +1292,9 @@ class App:
         ph.pack(anchor="w", pady=(3, 0))
 
         def show_desc(*_):
-            p = PRESETS.get(pv.get())
+            p = all_presets().get(pv.get())
             if p:
-                ph.config(text=p["desc"])
+                ph.config(text=p.get("desc", describe_preset(p)))
         pv.trace_add("write", show_desc)
         show_desc()
 
@@ -1356,7 +1548,7 @@ class App:
         mode = MODE_LABELS_REV.get(self.mode_var.get(), "lossless")
         q = int(self.quality_var.get())
         fmt = {"保持原格式 (推荐)": "keep", "JPG": "jpg",
-               "PNG": "png"}.get(self.fmt_var.get(), "keep")
+               "PNG": "png", "WebP": "webp"}.get(self.fmt_var.get(), "keep")
         side = {"原图": 0, "2560": 2560, "2048": 2048, "1600": 1600,
                 "1280": 1280, "1100": 1100, "1080": 1080}.get(self.side_var.get(), 0)
         try:
@@ -1718,7 +1910,10 @@ def _load_settings() -> dict:
     if s.get("preset") in PRESET_RENAMES:
         s["preset"] = PRESET_RENAMES[s["preset"]]
     # 逐字段校验, 配置文件是人手改的, 不能直接信
-    if s.get("preset") not in PRESETS:
+    # 注意: all_presets() = 内置 + 用户自定义。自定义预设被删了以后,
+    # 这里会把它判成非法并回落到默认 —— 这是对的, 总比右键压出一个
+    # 用户以为存在、其实已经没了的档位强。
+    if s.get("preset") not in all_presets():
         s["preset"] = V9_FALLBACK_PRESET
     if s.get("format") not in FORMAT_CHOICES:
         s["format"] = "keep"
@@ -1745,6 +1940,167 @@ def _save_settings(s: dict) -> bool:
         return False
 
 
+# ============================================================
+#  v11.4 用户自定义预设
+#
+#  为什么单独存一份, 而不是往 PRESETS 里塞:
+#    PRESETS 是内置档位的常量表, 有三处硬依赖它"恰好 10 个 / 顺序固定":
+#      - --preset N 按插入顺序编号, 内置档位必须永远是 1..10
+#      - 界面预设按钮按 PRESET_ROWS 铺, 行列是写死的
+#      - 打包后的 exe 回归会断言 len(PRESETS)==10 且名字顺序一致
+#    用户自己存的档位数量会变, 塞进去会把上面三条全部搞坏。
+#    所以内置表一动不动, 自定义档位单独存、单独读, 用的时候再合并。
+#
+#  为什么存在 %APPDATA% 而不是安装目录 (%LOCALAPPDATA%\图瘦身):
+#    安装目录 = Inno 的 {app}。卸载时 Inno 会删掉自己装进去的文件;
+#    更狠的是 v9_uninstall() 里那一行 shutil.rmtree(dest) ——
+#    用户在卸载时点"是"的话, 整个目录连同 settings.json 一起没了。
+#    用户的要求是"卸载后再装新版本, 预设还在", 所以自定义预设必须放在
+#    安装器和卸载器永远碰不到的地方。
+#    %APPDATA%\图瘦身\presets.json 正好满足: 安装器只写 {app},
+#    卸载只删 {app} 和注册表, AppData\Roaming 下的东西一概不动。
+# ============================================================
+
+# 测试钩子: 指到临时目录, 免得测试往用户真的 %APPDATA%\图瘦身 里写东西。
+# (_t_run_all.py 会把它指到临时目录, 跟 LOCALAPPDATA 隔离一个道理)
+CUSTOM_PRESETS_ENV = "PICSHINK_CUSTOM_PRESETS_DIR"
+CUSTOM_PRESETS_FILE = "presets.json"
+
+
+def _user_data_root() -> Path:
+    """用户数据目录 (%APPDATA%\\图瘦身) —— 自定义预设放这儿, 不放安装目录."""
+    override = os.environ.get(CUSTOM_PRESETS_ENV)
+    if override:
+        return Path(override)
+    base = os.environ.get("APPDATA") or ""
+    return (Path(base) if base else Path.home()) / "图瘦身"
+
+
+def _custom_presets_path() -> Path:
+    return _user_data_root() / CUSTOM_PRESETS_FILE
+
+
+def _clean_custom_preset(spec) -> dict | None:
+    """校验并清洗一个自定义预设的参数. 返回 None = 这条是坏的, 直接丢掉.
+
+    配置文件是人手改的(或者上个版本写的), 不能直接信。
+    """
+    if not isinstance(spec, dict):
+        return None
+    mode = str(spec.get("mode", "balanced"))
+    if mode not in MODE_LABELS:
+        mode = "balanced"
+    try:
+        quality = int(spec.get("quality", 85))
+    except (TypeError, ValueError):
+        quality = 85
+    quality = max(1, min(95, quality))
+    try:
+        target_kb = max(0, int(spec.get("target_kb", 0)))
+    except (TypeError, ValueError):
+        target_kb = 0
+    fmt = str(spec.get("format", "keep"))
+    if fmt not in ("keep", "jpg", "png", "webp"):
+        fmt = "keep"
+    try:
+        max_side = max(0, int(spec.get("max_side", 0)))
+    except (TypeError, ValueError):
+        max_side = 0
+    keep_exif = bool(spec.get("keep_exif", False))
+    # 目标体积 > 0 就必须是 target 模式, 否则那条目根本走不到目标分支
+    if target_kb > 0:
+        mode = "target"
+    return {"mode": mode, "quality": quality, "target_kb": target_kb,
+            "format": fmt, "max_side": max_side, "keep_exif": keep_exif}
+
+
+def load_custom_presets() -> dict:
+    """读用户自定义预设. 文件没了/坏了都当空, 绝不因为配置问题让程序起不来."""
+    p = _custom_presets_path()
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    items = raw.get("presets")
+    if not isinstance(items, dict):
+        items = raw            # 兼容直接写成 {名字: 参数} 的老格式
+    out = {}
+    for name, spec in items.items():
+        clean = _clean_custom_preset(spec)
+        if clean is None:
+            continue
+        out[str(name)] = clean
+    return out
+
+
+def save_custom_presets(items: dict) -> bool:
+    """写自定义预设. 先写临时文件再原子替换, 避免写一半断电留下半截 JSON."""
+    p = _custom_presets_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "presets": items}
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:
+        return False
+
+
+def describe_preset(spec: dict) -> str:
+    """给自定义预设生成一句人话描述 (界面/下拉框/日志都用它)."""
+    mode = spec.get("mode", "balanced")
+    if mode == "target":
+        side = spec.get("max_side", 0)
+        return (f"目标 ≤{spec.get('target_kb', 0)}KB, "
+                f"{('长边 ' + str(side)) if side else '尺寸不变'}, "
+                f"{str(spec.get('format', 'keep')).upper()}")
+    if mode == "lossless":
+        return "无损 (保留 EXIF)" if spec.get("keep_exif") else "无损 (剥 EXIF)"
+    label = "均衡" if mode == "balanced" else "激进"
+    return f"q={spec.get('quality', 85)} {label}"
+
+
+def all_presets() -> dict:
+    """内置预设 + 用户自定义预设.
+
+    自定义的名字不许跟内置重名 (存的时候就会拦掉), 所以这里不会遮住谁。
+    """
+    out = dict(PRESETS)
+    for name, spec in load_custom_presets().items():
+        if name in out:
+            continue
+        s = dict(spec)
+        s["desc"] = describe_preset(s)
+        out[name] = s
+    return out
+
+
+def _raw_settings() -> dict:
+    """读设置文件里的**原始**内容, 不做任何校验/回落.
+
+    改名/删除自定义预设的时候必须用这个, 不能用 _load_settings():
+    _load_settings() 读到"已经不存在的预设名"会判它非法, 然后静默回落成
+    默认档 —— 改名落盘之后旧名就已经不存在了, 这时候再读只会读到回落值,
+    永远等不到旧名, 于是"设置里指向这个预设"的引用就断了, 右键默认
+    悄悄变回「推荐压缩」, 用户完全不知道为什么。
+    """
+    for name in ("settings.json", "quick.json"):     # quick.json = v9 老文件
+        p = _pic_root() / name
+        if not p.is_file():
+            continue
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+        except Exception:
+            continue
+    return {}
+
+
 def _v9_load_preset() -> str:
     """快捷入口默认预设 = 你在设置里定的那个 (或 GUI 里手动点过的)."""
     return _load_settings()["preset"]
@@ -1752,7 +2108,7 @@ def _v9_load_preset() -> str:
 
 def _v9_save_preset(name: str) -> None:
     """GUI 里手动换预设时记一笔, 右键快捷入口下次就用它."""
-    if name not in PRESETS:
+    if name not in all_presets():
         return
     s = _load_settings()
     # 存进去的一定要是新名, 否则下一次读配置时又得靠迁移兜一遍
@@ -1874,7 +2230,7 @@ def _backup_original(src: Path) -> Path | None:
 _V9_VALUE_OPTS = {"--preset": "preset", "--out": "out", "--format": "format",
                   "--output-mode": "output_mode"}
 
-V9_USAGE = f"""图瘦身 (PicShrink) v11 — 快捷压缩入口
+V9_USAGE = f"""图瘦身 (PicShrink) v11.4 — 快捷压缩入口
 
   图瘦身.exe                            打开图形界面
   图瘦身.exe "D:\\图\\a.jpg"             直接压缩这一张
@@ -1990,11 +2346,21 @@ def _v9_expand(paths: list[str]) -> list[Path]:
 
 
 def _v9_resolve_preset(spec: str | None) -> str:
-    """预设可以是全名 / 1-{len(PRESETS)} 序号 / mode 名 (balanced 之类)."""
+    """预设可以是全名 / 1-{len(PRESETS)} 序号 / mode 名 (balanced 之类).
+
+    ⚠ 序号只给内置预设用, 自定义预设一律用全名选。
+      用户自定义预设的数量是会变的 (今天存 2 个, 明天删 1 个), 用序号指它
+      等于埋雷: 用户删掉一个自定义预设, 后面所有序号全部错位, 而老快捷方式
+      里存的序号不会跟着变, 结果就是"右键压出来的图跟当初选的根本不是一个档"。
+      内置预设永远是 1..10 固定不变, 所以序号这条路对内置永远安全。
+    """
     if not spec:
         return _v9_load_preset()
     s = spec.strip()
     if s in PRESETS:
+        return s
+    # 用户自定义预设: 只认全名
+    if s in load_custom_presets():
         return s
     # 预设改过名: 老快捷方式里可能还写着旧的全名, 照样认, 别让人直接报错
     if s in PRESET_RENAMES:
@@ -2091,7 +2457,7 @@ def _v9_report_text(results: list[dict], out_root: Path, preset_name: str) -> st
     saved = sum(r["src_bytes"] - r["out_bytes"]
                 for r in results if r["ok"] and r["out_bytes"] > 0)
     lines = [
-        "图瘦身 v11 — 完成",
+        "图瘦身 v11.4 — 完成",
         f"预设: {preset_name}",
         f"成功 {ok} · 跳过 {skip} · 失败 {fail}",
         f"省下: {human_size(max(0, saved))}" if saved > 0 else "没省下体积",
@@ -2113,7 +2479,7 @@ def _v9_fatal(msg: str, notify: bool = True) -> None:
         root = tk.Tk()
         root.withdraw()
         _v9_icon(root)
-        messagebox.showerror("图瘦身 v11", msg, parent=root)
+        messagebox.showerror("图瘦身 v11.4", msg, parent=root)
         root.destroy()
     except Exception:
         pass
@@ -2130,7 +2496,7 @@ def _v9_result_ui(root, results: list[dict], out_root: Path,
 
     for w in root.winfo_children():
         w.destroy()
-    root.title("图瘦身 v11 — 完成")
+    root.title("图瘦身 v11.4 — 完成")
     root.geometry(_v9_geometry(root, 620, 460))
     root.minsize(620, 460)
 
@@ -2265,7 +2631,10 @@ def _v9_quick(paths: list[str], opts: dict) -> int:
         _v9_fatal(str(e), notify=opts["notify"])
         return 2
 
-    pr = PRESETS[preset_name]
+    pr = all_presets().get(preset_name)
+    if not pr:
+        _v9_fatal(f"预设不存在: {preset_name}", notify=opts["notify"])
+        return 2
     mode = pr["mode"]
     quality = int(pr.get("quality", 85))
     max_side = int(pr.get("max_side", 0))
@@ -2401,7 +2770,7 @@ def _v9_show_help(notify: bool) -> None:
         root = tk.Tk()
         _v9_icon(root)
         _v9_style(root)
-        root.title("图瘦身 v11 — 用法")
+        root.title("图瘦身 v11.4 — 用法")
         outer = ttk.Frame(root, padding=14)
         outer.pack(fill="both", expand=True)
         txt = tk.Text(outer, font=("Consolas", 9), wrap="none", width=76)
@@ -2416,10 +2785,17 @@ def _v9_show_help(notify: bool) -> None:
 
 
 def _v9_show_presets(notify: bool) -> None:
-    lines = [f"共 {len(PRESETS)} 个预设 (快捷入口默认沿用 GUI 里你最后手动选的那个):", ""]
+    lines = [f"共 {len(PRESETS)} 个内置预设 (快捷入口默认沿用 GUI 里你最后手动选的那个):", ""]
     for i, (name, p) in enumerate(PRESETS.items(), 1):
         lines.append(f"{i}. {name}")
         lines.append(f"   {p['desc']}")
+    custom = load_custom_presets()
+    if custom:
+        lines.append("")
+        lines.append(f"另有 {len(custom)} 个自定义预设 (只能用全名选, 不占序号):")
+        for name, spec in custom.items():
+            lines.append(f"· {name}")
+            lines.append(f"   {describe_preset(spec)}")
     text = "\n".join(lines)
     if not notify:
         _v9_print(text)
@@ -2428,7 +2804,7 @@ def _v9_show_presets(notify: bool) -> None:
         root = tk.Tk()
         _v9_icon(root)
         _v9_style(root)
-        root.title("图瘦身 v11 — 预设清单")
+        root.title("图瘦身 v11.4 — 预设清单")
         outer = ttk.Frame(root, padding=14)
         outer.pack(fill="both", expand=True)
         txt = tk.Text(outer, font=("Consolas", 10), wrap="word", width=66)
@@ -2454,7 +2830,7 @@ def _v9_show_presets(notify: bool) -> None:
 #
 #  顺带把 exe 文件名改成 ASCII 的 PicShrink.exe, 这样批处理引用它也不会出事。
 
-V9_APP_TITLE = "图瘦身 (PicShrink) v11"
+V9_APP_TITLE = "图瘦身 (PicShrink) v11.4"
 V9_FOLDER_NAME = "图瘦身"
 
 # 右键现在是两条并排的路, 名字必须一眼能分开, 否则用户只能挨个试:
@@ -2467,7 +2843,17 @@ V9_FOLDER_NAME = "图瘦身"
 V9_MENU_KEY_QUICK = "PicShrinkQuick"
 V9_MENU_KEY_QUEUE = "PicShrinkQueue"
 # v9~v11.2 用过的中文键名。安装/卸载时都要主动删, 不能指望覆盖。
-V9_MENU_LEGACY_KEYS = ("用图瘦身处理",)
+#
+# ⚠ 这个名单是**攒出来的**, 不是想出来的 —— 每一个都是真机上有孤儿键才补进去的:
+#   "用图瘦身处理"      v9~v11.2 正式版的键名
+#   "用图瘦身压缩这个文件夹"  同上, 文件夹那一版(早先漏了, 于是文件夹右键
+#                        会多出一个点不掉的条目)
+#   "立即压缩" / "立即压缩这个文件夹"  v11.3 开发期的中间构建用显示名当过键名,
+#                        装过那一版的用户机器上会留下 command 为空的死键 ——
+#                        右键里看得见, 点下去什么都不发生
+# 补一条的代价是几行代码; 不补的代价是用户右键里永远多一个删不掉的条目。
+V9_MENU_LEGACY_KEYS = ("用图瘦身处理", "用图瘦身压缩这个文件夹",
+                       "立即压缩", "立即压缩这个文件夹")
 
 V9_MENU_NAME = "立即压缩"
 V9_MENU_NAME_DIR = "立即压缩这个文件夹"

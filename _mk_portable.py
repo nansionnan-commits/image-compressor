@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""打便携 ZIP: dist/PicShrink-v11.3-portable.zip
+"""打便携 ZIP: dist/PicShrink-v11.4-portable.zip
 
 包里只放 5 个文件, 保持"解压就能双击"的直觉:
   PicShrink.exe  install.bat  uninstall.bat  README.md  LICENSE
@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 EXE = DIST / "PicShrink.exe"
-ZIP = DIST / "PicShrink-v11.3-portable.zip"
+ZIP = DIST / "PicShrink-v11.4-portable.zip"
 MEMBERS = ["PicShrink.exe", "install.bat", "uninstall.bat", "README.md", "LICENSE"]
 # exe 在 dist/ 下, 其余在项目根
 SOURCES = {m: (DIST / m if m == "PicShrink.exe" else ROOT / m) for m in MEMBERS}
